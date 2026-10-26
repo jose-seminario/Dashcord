@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Neon Gamer Palette (Azul-Morado) */
+  --bg-base:        #0A0A1A;
+  --bg-surface:     #12122A;
+  --bg-elevated:    #1A1A3A;
+  --border-subtle:  #2A2A4A;
+  --accent-primary: #7C3AED;   /* violeta */
+  --accent-secondary: #00D9FF; /* cian neón */
+  --accent-tertiary:  #A855F7; /* púrpura */
+  --accent-glow:    #7C3AED66;
+  --text-primary:   #F0F0FF;
+  --text-secondary: #8888AA;
+  --text-muted:     #4A4A6A;
+  --success:        #00FF9D;
+  --danger:         #FF2E63;
+  --warning:        #FFB800;
+
+  /* Theme aliases */
+  --bg-secondary:   #12122A;
+  --bg-tertiary:    #1A1A3A;
+  --bg-hover:       rgba(124, 58, 237, 0.12);
+  --bg-active:      rgba(124, 58, 237, 0.22);
+  --status-online:  #00FF9D;
+  --status-idle:    #FFB800;
+  --status-dnd:     #FF2E63;
+  --status-offline: #4A4A6A;
+
+  /* Layout & Geometry */
+  --radius-default: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --font-base-size: 14px;
+}
+
+/* Scrollbar con gradiente y thumb redondeado */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-base);
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--accent-secondary), var(--accent-primary));
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, var(--accent-primary), var(--accent-tertiary));
+}
+
+/* App container base */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: var(--font-base-size);
+  color: var(--text-primary);
+  background-color: var(--bg-base);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Transiciones de 150-200ms en hover */
+button, a, input, select, textarea, .interactive-hover {
+  transition: all 180ms ease-in-out;
+}
+
+/* Glow en elementos activos */
+.glow-active {
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+/* Gradiente azul->violeta para TopBar y botones */
+.gradient-gaming-bar {
+  background: linear-gradient(90deg, rgba(0, 217, 255, 0.12) 0%, rgba(124, 58, 237, 0.18) 100%), var(--bg-surface);
+}
+
+.gradient-gaming-btn {
+  background: linear-gradient(135deg, var(--accent-secondary) 0%, var(--accent-primary) 100%);
+  color: #FFFFFF;
+  box-shadow: 0 0 12px var(--accent-glow);
+  transition: all 180ms ease-in-out;
+}
+
+.gradient-gaming-btn:hover {
+  filter: brightness(1.15);
+  box-shadow: 0 0 16px var(--accent-secondary);
+}
+
+/* Bordes de 1px con --accent-primary al 30% en cards y mensajes no leídos */
+.gamer-card {
+  border: 1px solid rgba(124, 58, 237, 0.3);
+  background-color: var(--bg-surface);
+  transition: all 180ms ease-in-out;
+}
+
+.gamer-card:hover {
+  border-color: var(--accent-secondary);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.unread-message {
+  border-left: 3px solid var(--accent-primary);
+  background: rgba(124, 58, 237, 0.08);
+}
+
+/* Glassmorphism utility */
+.glass-panel {
+  background: rgba(18, 18, 42, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(124, 58, 237, 0.3);
+}
+
+.glass-dropdown {
+  background: rgba(18, 18, 42, 0.95);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.7), 0 0 12px var(--accent-glow);
+}

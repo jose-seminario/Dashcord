@@ -1,0 +1,14 @@
+{
+  "client_build_number": 344210,
+  "client_version": "1.0.9168",
+  "release_channel": "stable",
+  "os": "Windows",
+  "os_version": "10.0.22631",
+  "os_arch": "x64",
+  "system_locale": "es-ES",
+  "browser": "Discord Client",
+  "browser_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9168 Chrome/128.0.6613.186 Electron/32.2.2 Safari/537.36",
+  "browser_version": "32.2.2",
+  "client_event_source": null,
+  "design_id": 0
+}

@@ -1,0 +1,32 @@
+[package]
+name = "dashcord"
+version = "0.1.0"
+description = "Cliente ligero de Discord con evasión de TLS y estética Midnight Blue"
+authors = ["DashCord Team"]
+edition = "2021"
+
+[lib]
+name = "dashcord_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+test-mock = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+keyring = "3.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+wreq = { version = "=6.0.0-rc.31", default-features = false, features = ["tokio-rt", "cookies", "gzip", "json"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
