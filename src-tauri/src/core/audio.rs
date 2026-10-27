@@ -1,9 +1,3 @@
-use audiopus::{
-    coder::{Decoder as OpusDecoder, Encoder as OpusEncoder},
-    packet::Packet as OpusPacket,
-    Application as OpusApp, Bitrate as OpusBitrate, Channels as OpusChannels, MutSignals,
-    SampleRate as OpusSampleRate, Signal as OpusSignal,
-};
 use chacha20poly1305::{
     aead::{AeadInPlace, KeyInit},
     Key as ChaChaKey, XChaCha20Poly1305, XNonce as ChaChaXNonce,
@@ -11,8 +5,11 @@ use chacha20poly1305::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 use nnnoiseless::DenoiseState;
+use opus::{
+    Application as OpusApp, Bitrate as OpusBitrate, Channels as OpusChannels,
+    Decoder as OpusDecoder, Encoder as OpusEncoder, Signal as OpusSignal,
+};
 use std::collections::{HashMap, VecDeque};
-use std::convert::TryFrom;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -106,7 +103,7 @@ struct PeerDecoderState {
 
 impl PeerDecoderState {
     fn new() -> Result<Self, String> {
-        let decoder = OpusDecoder::new(OpusSampleRate::Hz48000, OpusChannels::Stereo)
+        let decoder = OpusDecoder::new(TARGET_SAMPLE_RATE, OpusChannels::Stereo)
             .map_err(|e| format!("Error creando decodificador Opus: {:?}", e))?;
         Ok(Self {
             decoder,
@@ -614,18 +611,9 @@ impl VoiceAudioEngine {
                     continue;
                 }
 
-                let Ok(opus_pkt) = OpusPacket::try_from(opus_data.as_slice()) else {
-                    continue;
-                };
-                let Ok(out_signals) = MutSignals::try_from(peer_state.pcm_buf.as_mut_slice())
-                else {
-                    continue;
-                };
-
-                if let Ok(decoded_samples_per_ch) =
-                    peer_state
-                        .decoder
-                        .decode_float(Some(opus_pkt), out_signals, false)
+                if let Ok(decoded_samples_per_ch) = peer_state
+                    .decoder
+                    .decode_float(&opus_data, &mut peer_state.pcm_buf, false)
                 {
                     let total_stereo_samples =
                         (decoded_samples_per_ch * 2).min(peer_state.pcm_buf.len());
@@ -753,13 +741,13 @@ impl VoiceAudioEngine {
             .name("dashcord-voice-dsp".to_string())
             .spawn(move || {
                 let Ok(mut encoder) =
-                    OpusEncoder::new(OpusSampleRate::Hz48000, OpusChannels::Mono, OpusApp::Voip)
+                    OpusEncoder::new(TARGET_SAMPLE_RATE, OpusChannels::Mono, OpusApp::Voip)
                 else {
                     eprintln!("[VOICE AUDIO] No se pudo inicializar OpusEncoder.");
                     return;
                 };
 
-                let _ = encoder.set_bitrate(OpusBitrate::BitsPerSecond(64_000));
+                let _ = encoder.set_bitrate(OpusBitrate::Bits(64_000));
                 let _ = encoder.set_signal(OpusSignal::Voice);
                 let _ = encoder.set_inband_fec(true);
                 let _ = encoder.set_packet_loss_perc(15);
@@ -943,15 +931,15 @@ mod tests {
 
     #[test]
     fn test_opus_encoder_decoder_roundtrip() {
-        let encoder = OpusEncoder::new(
-            OpusSampleRate::Hz48000,
+        let mut encoder = OpusEncoder::new(
+            TARGET_SAMPLE_RATE,
             OpusChannels::Stereo,
             OpusApp::Voip,
         )
         .expect("Fallo al inicializar codificador Opus");
 
         let mut decoder = OpusDecoder::new(
-            OpusSampleRate::Hz48000,
+            TARGET_SAMPLE_RATE,
             OpusChannels::Stereo,
         )
         .expect("Fallo al inicializar decodificador Opus");
@@ -965,12 +953,8 @@ mod tests {
         assert!(encoded_len > 0);
 
         let mut pcm_out = vec![0.0f32; 1920];
-        let packet = OpusPacket::try_from(&opus_out[..encoded_len])
-            .expect("Packet Opus inválido");
-        let out_signals = MutSignals::try_from(pcm_out.as_mut_slice())
-            .expect("MutSignals slice inválido");
         let decoded_samples = decoder
-            .decode_float(Some(packet), out_signals, false)
+            .decode_float(&opus_out[..encoded_len], &mut pcm_out, false)
             .expect("Fallo al decodificar audio Opus");
         assert_eq!(decoded_samples, 960);
     }
