@@ -39,6 +39,7 @@ export const App: React.FC = () => {
     let unlistenMsg: UnlistenFn | undefined;
     let unlistenPres: UnlistenFn | undefined;
     let unlistenVoice: UnlistenFn | undefined;
+    let unlistenVoiceConn: UnlistenFn | undefined;
     let unlistenErr: UnlistenFn | undefined;
     let isMounted = true;
 
@@ -72,6 +73,13 @@ export const App: React.FC = () => {
       }
     };
 
+    const onDomVoiceConn = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      if (customEvt.detail) {
+        useAppStore.getState().handleVoiceConnectionStatus(customEvt.detail);
+      }
+    };
+
     const onDomError = (e: Event) => {
       const customEvt = e as CustomEvent;
       const detail = customEvt.detail;
@@ -87,6 +95,7 @@ export const App: React.FC = () => {
     window.addEventListener('dashcord:gateway-message-create', onDomMessage);
     window.addEventListener('dashcord:gateway-presence-update', onDomPresence);
     window.addEventListener('dashcord:gateway-voice-state-update', onDomVoice);
+    window.addEventListener('dashcord:voice-connection-status', onDomVoiceConn);
     window.addEventListener('dashcord:gateway-error', onDomError);
 
     // B) Listeners de la API de eventos de Tauri v2 (@tauri-apps/api/event)
@@ -137,6 +146,17 @@ export const App: React.FC = () => {
       }
 
       try {
+        const uVoiceConn = await listen<any>('voice-connection-status', (event) => {
+          if (!isMounted) return;
+          useAppStore.getState().handleVoiceConnectionStatus(event.payload);
+        });
+        if (isMounted) unlistenVoiceConn = uVoiceConn;
+        else uVoiceConn();
+      } catch (err) {
+        console.warn('[IPC TAURI] Aviso al registrar listener voice-connection-status:', err);
+      }
+
+      try {
         const uErr = await listen<any>('gateway-error', (event) => {
           if (!isMounted) return;
           const msg =
@@ -181,11 +201,13 @@ export const App: React.FC = () => {
       window.removeEventListener('dashcord:gateway-message-create', onDomMessage);
       window.removeEventListener('dashcord:gateway-presence-update', onDomPresence);
       window.removeEventListener('dashcord:gateway-voice-state-update', onDomVoice);
+      window.removeEventListener('dashcord:voice-connection-status', onDomVoiceConn);
       window.removeEventListener('dashcord:gateway-error', onDomError);
       if (unlistenReady) unlistenReady();
       if (unlistenMsg) unlistenMsg();
       if (unlistenPres) unlistenPres();
       if (unlistenVoice) unlistenVoice();
+      if (unlistenVoiceConn) unlistenVoiceConn();
       if (unlistenErr) unlistenErr();
     };
   }, []);
@@ -202,9 +224,14 @@ export const App: React.FC = () => {
           recent_messages?: any[];
           recent_presences?: any[];
           recent_voice_states?: any[];
+          voice_status?: any;
         }>('get_gateway_snapshot');
 
         const state = useAppStore.getState();
+
+        if (snap.voice_status && snap.voice_status.state !== state.voiceConnection.state) {
+          state.handleVoiceConnectionStatus(snap.voice_status);
+        }
 
         if (snap.status === 'ready' && snap.ready_payload && !state.isAuthenticated) {
           console.log('[IPC SNAPSHOT] READY sincronizado desde backend:', snap.ready_payload);

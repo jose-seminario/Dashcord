@@ -8,6 +8,8 @@ import {
   Headphones,
   Settings,
   ChevronDown,
+  PhoneOff,
+  Radio,
 } from 'lucide-react';
 import { useAppStore, resolveAvatarUrl } from '../../stores/useAppStore';
 
@@ -17,13 +19,17 @@ export const ChannelSidebar: React.FC = () => {
     selectedGuildId,
     selectedChannelId,
     setSelectedChannel,
+    joinVoiceChannel,
+    leaveVoiceChannel,
     currentUser,
     voiceStates,
+    voiceConnection,
     setSettingsOpen,
   } = useAppStore();
 
   const currentGuild = guilds.find((g) => g.id === selectedGuildId);
   const channels = currentGuild?.channels || [];
+  const activeVoiceChannel = channels.find((c) => c.id === voiceConnection.channel_id);
 
   const getChannelIcon = (type: string) => {
     switch (type) {
@@ -75,14 +81,24 @@ export const ChannelSidebar: React.FC = () => {
         ) : (
           channels.map((channel) => {
             const isSelected = selectedChannelId === channel.id;
+            const isVoiceConnectedHere =
+              channel.type === 'voice' &&
+              voiceConnection.state !== 'disconnected' &&
+              voiceConnection.channel_id === channel.id;
             const voiceUsers = voiceStates[channel.id] || [];
 
             return (
               <div key={channel.id} className="space-y-0.5">
                 <button
-                  onClick={() => setSelectedChannel(channel.id)}
+                  onClick={() => {
+                    if (channel.type === 'voice' && currentGuild) {
+                      joinVoiceChannel(currentGuild.id, channel.id);
+                    } else {
+                      setSelectedChannel(channel.id);
+                    }
+                  }}
                   className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-sm transition-all duration-150 ${
-                    isSelected
+                    isSelected || isVoiceConnectedHere
                       ? 'bg-active text-primary font-medium border-l-2 border-accent-cyan'
                       : 'text-secondary_text hover:text-primary hover:bg-hover'
                   }`}
@@ -135,6 +151,55 @@ export const ChannelSidebar: React.FC = () => {
           })
         )}
       </div>
+
+      {/* Active Voice Gateway Connection Status Bar */}
+      {voiceConnection.state !== 'disconnected' && (
+        <div className="bg-base/95 border-t border-accent-cyan/30 px-3 py-2 flex items-center justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <Radio
+                className={`w-3.5 h-3.5 flex-shrink-0 ${
+                  voiceConnection.state === 'connected'
+                    ? 'text-emerald-400 animate-pulse'
+                    : voiceConnection.state === 'error'
+                    ? 'text-rose-400'
+                    : 'text-amber-400 animate-spin'
+                }`}
+              />
+              <span
+                className={`text-xs font-semibold truncate ${
+                  voiceConnection.state === 'connected'
+                    ? 'text-emerald-400'
+                    : voiceConnection.state === 'error'
+                    ? 'text-rose-400'
+                    : 'text-amber-400'
+                }`}
+              >
+                {voiceConnection.state === 'connected'
+                  ? 'Voz Conectada (UDP)'
+                  : voiceConnection.state === 'error'
+                  ? 'Error de Voz'
+                  : 'Handshake de Voz...'}
+              </span>
+            </div>
+            <div className="text-[10px] text-muted truncate font-mono mt-0.5">
+              {voiceConnection.ip && voiceConnection.port
+                ? `${voiceConnection.ip}:${voiceConnection.port} • ${voiceConnection.encryption_mode || 'xsalsa20'}`
+                : activeVoiceChannel?.name || 'Estableciendo túnel...'}
+            </div>
+          </div>
+
+          <button
+            onClick={() =>
+              leaveVoiceChannel(voiceConnection.guild_id || selectedGuildId)
+            }
+            title="Desconectar del canal de voz"
+            className="p-1.5 rounded-md bg-rose-500/15 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 transition-colors flex-shrink-0"
+          >
+            <PhoneOff className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* User Bottom Status Card */}
       <div className="h-14 bg-base/80 border-t border-border-subtle px-2 flex items-center justify-between">

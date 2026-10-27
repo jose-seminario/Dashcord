@@ -85,3 +85,16 @@ export interface ConnectionStatus {
   tls_spoofed: boolean;
   build_number: number;
 }
+
+export interface VoiceConnectionStatus {
+  state: 'disconnected' | 'connecting' | 'connected' | 'error' | string;
+  guild_id?: string | null;
+  channel_id?: string | null;
+  endpoint?: string | null;
+  ip?: string | null;
+  port?: number | null;
+  ssrc?: number | null;
+  encryption_mode?: string | null;
+  has_secret_key?: boolean;
+  error?: string | null;
+}

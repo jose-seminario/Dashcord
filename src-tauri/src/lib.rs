@@ -62,6 +62,21 @@ async fn send_discord_message(
 }
 
 #[tauri::command]
+async fn join_voice_channel(guild_id: String, channel_id: String) -> Result<(), String> {
+    GatewayManager::join_voice_channel(guild_id, channel_id).await
+}
+
+#[tauri::command]
+async fn leave_voice_channel(app: tauri::AppHandle, guild_id: String) -> Result<(), String> {
+    GatewayManager::leave_voice_channel(&app, guild_id).await
+}
+
+#[tauri::command]
+fn get_voice_status() -> Result<core::VoiceConnectionStatus, String> {
+    Ok(core::VoiceGatewayManager::get_status())
+}
+
+#[tauri::command]
 async fn save_token(
     app: tauri::AppHandle,
     config: State<'_, AppConfig>,
@@ -201,6 +216,9 @@ pub fn run() {
             get_gateway_snapshot,
             fetch_channel_messages,
             send_discord_message,
+            join_voice_channel,
+            leave_voice_channel,
+            get_voice_status,
             save_token,
             connect_saved_token,
             get_token,

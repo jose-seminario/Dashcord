@@ -7,6 +7,7 @@ import {
   ConnectionStatus,
   VoiceStateUser,
   PresenceUpdate,
+  VoiceConnectionStatus,
 } from '../types/discord';
 
 let connectionTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -149,6 +150,7 @@ interface AppState {
   loadingChannels: Record<string, boolean>;          // channel_id -> loading state
   members: Record<string, User[]>;                   // guild_id -> members
   voiceStates: Record<string, VoiceStateUser[]>;     // channel_id -> users in voice
+  voiceConnection: VoiceConnectionStatus;
   connectionStatus: ConnectionStatus;
 
   // Settings & Theme
@@ -159,6 +161,8 @@ interface AppState {
   // Actions
   setSelectedGuild: (id: string) => void;
   setSelectedChannel: (id: string) => void;
+  joinVoiceChannel: (guildId: string, channelId: string) => Promise<void>;
+  leaveVoiceChannel: (guildId: string) => Promise<void>;
   toggleMembersSidebar: () => void;
   setSettingsOpen: (open: boolean) => void;
   setCommandPaletteOpen: (open: boolean) => void;
@@ -174,6 +178,7 @@ interface AppState {
   handleGatewayMessage: (rawMessage: any) => void;
   handlePresenceUpdate: (update: PresenceUpdate) => void;
   handleVoiceStateUpdate: (vs: VoiceStateUser) => void;
+  handleVoiceConnectionStatus: (status: VoiceConnectionStatus) => void;
   handleGatewayError: (error: string) => void;
 }
 
@@ -216,6 +221,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadingChannels: {},
   members: {},
   voiceStates: {},
+  voiceConnection: {
+    state: 'disconnected',
+  },
 
   connectionStatus: {
     gateway: 'disconnected',
@@ -251,6 +259,44 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ selectedChannelId: id });
     if (id && get().isAuthenticated) {
       get().fetchMessagesForChannel(id);
+    }
+  },
+
+  joinVoiceChannel: async (guildId, channelId) => {
+    if (!guildId || !channelId) return;
+    set({
+      voiceConnection: {
+        state: 'connecting',
+        guild_id: guildId,
+        channel_id: channelId,
+      },
+    });
+    try {
+      await invoke('join_voice_channel', { guildId, channelId });
+    } catch (err) {
+      console.error('[VOICE] Error solicitando unión a canal de voz:', err);
+      set({
+        voiceConnection: {
+          state: 'error',
+          guild_id: guildId,
+          channel_id: channelId,
+          error: String(err),
+        },
+      });
+    }
+  },
+
+  leaveVoiceChannel: async (guildId) => {
+    set({
+      voiceConnection: {
+        state: 'disconnected',
+      },
+    });
+    if (!guildId) return;
+    try {
+      await invoke('leave_voice_channel', { guildId });
+    } catch (err) {
+      console.error('[VOICE] Error desconectando del canal de voz:', err);
     }
   },
 
@@ -625,6 +671,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       return { voiceStates: nextVoiceStates };
     });
+  },
+
+  handleVoiceConnectionStatus: (status) => {
+    if (!status) return;
+    set({ voiceConnection: status });
   },
 
   handleGatewayError: (error) => {

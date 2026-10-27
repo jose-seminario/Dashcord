@@ -2,6 +2,7 @@ use crate::core::models::{
     FrontendChannel, FrontendGuild, FrontendReadyPayload, PresenceUpdatePayload, UserPayload,
     VoiceStatePayload,
 };
+use crate::core::voice::{VoiceConnectionStatus, VoiceGatewayManager};
 use crate::evasion::SuperProperties;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ pub struct GatewaySnapshot {
     pub recent_messages: Vec<serde_json::Value>,
     pub recent_presences: Vec<PresenceUpdatePayload>,
     pub recent_voice_states: Vec<VoiceStatePayload>,
+    pub voice_status: Option<VoiceConnectionStatus>,
 }
 
 static SHARED_SNAPSHOT: OnceLock<std::sync::Mutex<GatewaySnapshot>> = OnceLock::new();
@@ -40,6 +42,9 @@ static ACTIVE_ABORT_HANDLE: OnceLock<std::sync::Mutex<Option<tokio::task::AbortH
 static LAST_CONNECT_ATTEMPT: OnceLock<std::sync::Mutex<Option<(String, Instant)>>> =
     OnceLock::new();
 static ACTIVE_TOKEN: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
+static MAIN_WS_TX: OnceLock<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<WsMessage>>>> =
+    OnceLock::new();
+static ACTIVE_VOICE_CHANNEL: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 
 fn snapshot_lock() -> &'static std::sync::Mutex<GatewaySnapshot> {
     SHARED_SNAPSHOT.get_or_init(|| {
@@ -50,6 +55,7 @@ fn snapshot_lock() -> &'static std::sync::Mutex<GatewaySnapshot> {
             recent_messages: Vec::new(),
             recent_presences: Vec::new(),
             recent_voice_states: Vec::new(),
+            voice_status: None,
         })
     })
 }
@@ -64,6 +70,14 @@ fn attempt_lock() -> &'static std::sync::Mutex<Option<(String, Instant)>> {
 
 fn token_lock() -> &'static std::sync::Mutex<Option<String>> {
     ACTIVE_TOKEN.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn main_ws_tx_lock() -> &'static std::sync::Mutex<Option<tokio::sync::mpsc::Sender<WsMessage>>> {
+    MAIN_WS_TX.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn active_voice_channel_lock() -> &'static std::sync::Mutex<Option<String>> {
+    ACTIVE_VOICE_CHANNEL.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 /// Extrae el custom_status o actividad actual desde el array `activities` de una presencia de Discord
@@ -166,7 +180,8 @@ impl GatewayManager {
     /// Devuelve una copia instantánea del estado actual del Gateway para consulta directa desde React
     pub fn get_snapshot() -> GatewaySnapshot {
         if let Ok(mut guard) = snapshot_lock().lock() {
-            let snap = guard.clone();
+            let mut snap = guard.clone();
+            snap.voice_status = Some(VoiceGatewayManager::get_status());
             guard.recent_messages.clear();
             guard.recent_presences.clear();
             guard.recent_voice_states.clear();
@@ -174,6 +189,66 @@ impl GatewayManager {
         } else {
             GatewaySnapshot::default()
         }
+    }
+
+    /// Envía Opcode 4 (Voice State Update) al Gateway principal para unirse a un canal de voz
+    pub async fn join_voice_channel(guild_id: String, channel_id: String) -> Result<(), String> {
+        if let Ok(mut ch_guard) = active_voice_channel_lock().lock() {
+            *ch_guard = Some(channel_id.clone());
+        }
+
+        let tx_opt = main_ws_tx_lock().lock().ok().and_then(|g| g.clone());
+        let Some(tx) = tx_opt else {
+            return Err("El Gateway principal no está conectado.".to_string());
+        };
+
+        let op4 = serde_json::json!({
+            "op": 4,
+            "d": {
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "self_mute": false,
+                "self_deaf": false,
+                "self_video": false
+            }
+        });
+
+        println!(
+            "[VOICE] Solicitando unión al canal de voz {} (servidor {}) vía Opcode 4...",
+            channel_id, guild_id
+        );
+        let _ = std::io::stdout().flush();
+
+        tx.send(WsMessage::Text(op4.to_string().into()))
+            .await
+            .map_err(|e| format!("Error enviando Opcode 4 al Gateway: {}", e))
+    }
+
+    /// Envía Opcode 4 con channel_id: null para desconectarse del canal de voz
+    pub async fn leave_voice_channel(
+        app: &tauri::AppHandle,
+        guild_id: String,
+    ) -> Result<(), String> {
+        if let Ok(mut ch_guard) = active_voice_channel_lock().lock() {
+            *ch_guard = None;
+        }
+
+        VoiceGatewayManager::disconnect(app);
+
+        let tx_opt = main_ws_tx_lock().lock().ok().and_then(|g| g.clone());
+        if let Some(tx) = tx_opt {
+            let op4 = serde_json::json!({
+                "op": 4,
+                "d": {
+                    "guild_id": guild_id,
+                    "channel_id": serde_json::Value::Null,
+                    "self_mute": false,
+                    "self_deaf": false
+                }
+            });
+            let _ = tx.send(WsMessage::Text(op4.to_string().into())).await;
+        }
+        Ok(())
     }
 
     /// Mantiene compatibilidad con las pruebas unitarias del backend
@@ -408,6 +483,10 @@ impl GatewayManager {
         let (mut write_half, mut read_half) = ws_stream.split();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
 
+        if let Ok(mut ws_tx_guard) = main_ws_tx_lock().lock() {
+            *ws_tx_guard = Some(tx.clone());
+        }
+
         // 3. Tarea para enviar mensajes WebSocket de manera thread-safe
         let writer_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -425,6 +504,10 @@ impl GatewayManager {
         let mut error_emitted = false;
         let mut known_users: HashMap<String, UserPayload> = HashMap::new();
         let mut guild_ids_order: Vec<String> = Vec::new();
+        let mut current_user_id = String::new();
+        let mut current_session_id = String::new();
+        // (guild_id, voice_token, endpoint) si VOICE_SERVER_UPDATE llega antes que session_id
+        let mut pending_voice_server: Option<(String, String, String)> = None;
 
         // 4. Bucle principal de lectura del Gateway
         while let Some(msg_result) = read_half.next().await {
@@ -612,6 +695,10 @@ impl GatewayManager {
                             let d = &val["d"];
                             let u = &d["user"];
 
+                            if let Some(sid) = d["session_id"].as_str() {
+                                current_session_id = sid.to_string();
+                            }
+
                             let current_user = UserPayload {
                                 id: u["id"].as_str().unwrap_or("").to_string(),
                                 username: u["username"].as_str().unwrap_or("").to_string(),
@@ -626,6 +713,7 @@ impl GatewayManager {
                                 is_bot: Some(false),
                             };
 
+                            current_user_id = current_user.id.clone();
                             known_users.insert(current_user.id.clone(), current_user.clone());
 
                             // 1. Indexar d["users"] globales del evento READY
@@ -981,6 +1069,31 @@ impl GatewayManager {
                             );
                             let _ = std::io::stdout().flush();
 
+                            // Si el usuario ya estaba en un canal de voz o el servidor tiene un canal de voz disponible,
+                            // iniciamos la señalización Opcode 4 para establecer el handshake del Voice Gateway (Fase A)
+                            let mut auto_voice_target: Option<(String, String)> = None;
+                            for g_item in &guilds_list {
+                                if let Some(existing_vs) = g_item.voice_states.iter().find(|vs| {
+                                    vs.user_id == current_user.id && vs.channel_id.is_some()
+                                }) {
+                                    if let Some(ref cid) = existing_vs.channel_id {
+                                        auto_voice_target = Some((g_item.id.clone(), cid.clone()));
+                                        break;
+                                    }
+                                }
+                            }
+                            if auto_voice_target.is_none() {
+                                for g_item in &guilds_list {
+                                    if let Some(v_ch) =
+                                        g_item.channels.iter().find(|c| c.channel_type == "voice")
+                                    {
+                                        auto_voice_target =
+                                            Some((g_item.id.clone(), v_ch.id.clone()));
+                                        break;
+                                    }
+                                }
+                            }
+
                             let ready_payload = FrontendReadyPayload {
                                 user: current_user,
                                 guilds: guilds_list,
@@ -993,6 +1106,23 @@ impl GatewayManager {
                             }
 
                             emit_ipc_event(&app, "gateway-ready", &ready_payload);
+
+                            if let Some((v_guild_id, v_channel_id)) = auto_voice_target {
+                                if let Ok(mut ch_guard) = active_voice_channel_lock().lock() {
+                                    *ch_guard = Some(v_channel_id.clone());
+                                }
+                                let op4 = serde_json::json!({
+                                    "op": 4,
+                                    "d": {
+                                        "guild_id": v_guild_id,
+                                        "channel_id": v_channel_id,
+                                        "self_mute": false,
+                                        "self_deaf": false,
+                                        "self_video": false
+                                    }
+                                });
+                                let _ = tx.send(WsMessage::Text(op4.to_string().into())).await;
+                            }
                         } else if event_type == "READY_SUPPLEMENTAL" {
                             let d = &val["d"];
                             // Procesar presencias y voice_states suplementarios que Discord envía justo después de READY
@@ -1135,6 +1265,36 @@ impl GatewayManager {
                                 let channel_id = d["channel_id"].as_str().map(|s| s.to_string());
                                 let guild_id = d["guild_id"].as_str().map(|s| s.to_string());
 
+                                // Si el cambio de estado de voz pertenece a nuestro usuario, actualizar session_id de voz
+                                if uid == current_user_id {
+                                    if let Some(sid) = d["session_id"].as_str() {
+                                        if !sid.is_empty() {
+                                            current_session_id = sid.to_string();
+                                        }
+                                    }
+                                    if let Ok(mut ch_guard) = active_voice_channel_lock().lock() {
+                                        *ch_guard = channel_id.clone();
+                                    }
+
+                                    if channel_id.is_none() {
+                                        VoiceGatewayManager::disconnect(&app);
+                                    } else if let Some((p_guild_id, p_token, p_endpoint)) =
+                                        pending_voice_server.take()
+                                    {
+                                        if !current_session_id.is_empty() {
+                                            VoiceGatewayManager::start_voice_session(
+                                                app.clone(),
+                                                p_guild_id,
+                                                channel_id.clone(),
+                                                current_user_id.clone(),
+                                                current_session_id.clone(),
+                                                p_token,
+                                                p_endpoint,
+                                            );
+                                        }
+                                    }
+                                }
+
                                 let member_user = &d["member"]["user"];
                                 let username = member_user["global_name"]
                                     .as_str()
@@ -1170,6 +1330,36 @@ impl GatewayManager {
                                     snap.recent_voice_states.push(vs_payload.clone());
                                 }
                                 emit_ipc_event(&app, "gateway-voice-state-update", &vs_payload);
+                            }
+                        } else if event_type == "VOICE_SERVER_UPDATE" {
+                            let d = &val["d"];
+                            let v_guild_id = d["guild_id"].as_str().unwrap_or("").to_string();
+                            let v_token = d["token"].as_str().unwrap_or("").to_string();
+                            let v_endpoint = d["endpoint"].as_str().map(|s| s.to_string());
+
+                            if let Some(endpoint) = v_endpoint {
+                                if !v_guild_id.is_empty() && !v_token.is_empty() {
+                                    let active_ch = active_voice_channel_lock()
+                                        .lock()
+                                        .ok()
+                                        .and_then(|g| g.clone());
+
+                                    if !current_session_id.is_empty() && !current_user_id.is_empty()
+                                    {
+                                        VoiceGatewayManager::start_voice_session(
+                                            app.clone(),
+                                            v_guild_id,
+                                            active_ch,
+                                            current_user_id.clone(),
+                                            current_session_id.clone(),
+                                            v_token,
+                                            endpoint,
+                                        );
+                                    } else {
+                                        pending_voice_server =
+                                            Some((v_guild_id, v_token, endpoint));
+                                    }
+                                }
                             }
                         }
                     }
