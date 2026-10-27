@@ -10,6 +10,7 @@ jobs:
   build-dashcord:
     runs-on: windows-latest
     env:
+      CMAKE_GENERATOR: Ninja
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
     steps:
@@ -26,6 +27,9 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
 
       - name: Setup NASM for BoringSSL
         uses: ilammy/setup-nasm@v1
@@ -71,12 +75,15 @@ jobs:
         working-directory: src-tauri
         shell: pwsh
         continue-on-error: true
+        env:
+          CMAKE_GENERATOR: Ninja
         run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
 
       - name: Build Tauri Application
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CMAKE_GENERATOR: Ninja
         with:
           args: --target x86_64-pc-windows-msvc
 
