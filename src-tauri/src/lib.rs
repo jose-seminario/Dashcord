@@ -6,7 +6,7 @@ use core::GatewayManager;
 use evasion::{SuperProperties, VersionResolver};
 use std::io::Write;
 use storage::KeychainManager;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 pub struct AppConfig {
@@ -28,7 +28,19 @@ async fn save_token(
     config: State<'_, AppConfig>,
     token: String,
 ) -> Result<(), String> {
-    KeychainManager::store_token(&token, config.is_dry_run)?;
+    println!("[CMD] save_token invocado desde el frontend");
+    let _ = std::io::stdout().flush();
+
+    if let Err(e) = KeychainManager::store_token(&token, config.is_dry_run) {
+        let err_msg = format!("Error guardando en Keychain: {}", e);
+        eprintln!("[KEYCHAIN ERROR] {}", err_msg);
+        let _ = app.emit("gateway-error", serde_json::json!({ "message": err_msg }));
+        return Err(err_msg);
+    }
+
+    println!("[KEYCHAIN] Token almacenado. Iniciando conexión al Gateway...");
+    let _ = std::io::stdout().flush();
+
     GatewayManager::start_gateway(app, token, config.is_dry_run).await;
     Ok(())
 }
@@ -38,12 +50,21 @@ async fn connect_saved_token(
     app: tauri::AppHandle,
     config: State<'_, AppConfig>,
 ) -> Result<bool, String> {
+    println!("[CMD] connect_saved_token verificando Keychain...");
+    let _ = std::io::stdout().flush();
+
     match KeychainManager::get_token() {
         Ok(token) if !token.trim().is_empty() => {
+            println!("[KEYCHAIN] Token encontrado en Keychain. Conectando al Gateway...");
+            let _ = std::io::stdout().flush();
             GatewayManager::start_gateway(app, token, config.is_dry_run).await;
             Ok(true)
         }
-        _ => Ok(false),
+        _ => {
+            println!("[KEYCHAIN] No hay token guardado en Keychain.");
+            let _ = std::io::stdout().flush();
+            Ok(false)
+        }
     }
 }
 
@@ -104,6 +125,37 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            // Manejador de errores / pánicos global de Rust que imprime en consola y notifica al frontend
+            std::panic::set_hook(Box::new(move |panic_info| {
+                let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Fallo interno inesperado en Rust".to_string()
+                };
+
+                let location = panic_info
+                    .location()
+                    .map(|l| format!("{}:{}", l.file(), l.line()))
+                    .unwrap_or_else(|| "ubicación desconocida".to_string());
+
+                let full_err = format!("Error crítico en backend ({}): {}", location, msg);
+                println!("[RUST PANIC] {}", full_err);
+                eprintln!("[RUST PANIC] {}", full_err);
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
+
+                let _ = app_handle.emit(
+                    "gateway-error",
+                    serde_json::json!({ "message": full_err }),
+                );
+            }));
+
+            Ok(())
+        })
         .manage(AppConfig { is_dry_run })
         .manage(GatewayHolder {
             manager: Mutex::new(gateway_manager),

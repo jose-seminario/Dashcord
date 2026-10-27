@@ -43,6 +43,7 @@ export const App: React.FC = () => {
       try {
         const uReady = await listen<any>('gateway-ready', (event) => {
           if (!isMounted) return;
+          console.log('[FRONTEND] Evento gateway-ready recibido:', event.payload);
           handleGatewayReady(event.payload);
         });
         if (isMounted) unlistenReady = uReady;
@@ -61,21 +62,24 @@ export const App: React.FC = () => {
             typeof event.payload === 'string'
               ? event.payload
               : event.payload?.message || 'Error en la conexión con el Gateway';
+          console.error('[FRONTEND] Evento gateway-error recibido:', msg);
           handleGatewayError(msg);
         });
         if (isMounted) unlistenErr = uErr;
         else uErr();
 
-        // Autoconectar si existe un token previo en el Keychain
-        const hasSaved = await invoke<boolean>('connect_saved_token');
-        if (hasSaved) {
+        // Verificar si existe token en Keychain antes de lanzar conexión
+        const savedToken = await invoke<string>('get_token').catch(() => '');
+        if (savedToken && savedToken.trim().length > 0) {
           setConnecting(true);
+          await invoke<boolean>('connect_saved_token');
         } else if (!isAuthenticated) {
           setSettingsOpen(true);
         }
       } catch (err) {
         console.warn('Error en inicialización del Gateway de Tauri:', err);
         if (isMounted && !isAuthenticated) {
+          setConnecting(false);
           setSettingsOpen(true);
         }
       }
@@ -129,7 +133,7 @@ export const App: React.FC = () => {
                 <span>Conectando al Gateway v10...</span>
               </h2>
               <p className="text-xs text-muted">
-                Estableciendo WebSocket con Jitter y huella TLS suplantada (BoringSSL)
+                Estableciendo WebSocket con Jitter y huella TLS suplantada (Build 382000)
               </p>
             </div>
 
@@ -139,10 +143,13 @@ export const App: React.FC = () => {
             </div>
 
             <button
-              onClick={() => setSettingsOpen(true)}
+              onClick={() => {
+                setConnecting(false);
+                setSettingsOpen(true);
+              }}
               className="mt-4 px-4 py-1.5 rounded-lg text-xs text-secondary_text hover:text-primary bg-surface hover:bg-hover border border-border-subtle transition-colors"
             >
-              Abrir Ajustes de Token
+              Cancelar / Cambiar Token
             </button>
           </div>
         )}
@@ -162,7 +169,7 @@ export const App: React.FC = () => {
             </div>
 
             {authError && (
-              <div className="p-3 max-w-sm rounded-lg bg-rose-950/40 border border-rose-500/50 flex items-center gap-2 text-xs text-rose-300">
+              <div className="p-3 max-w-md rounded-lg bg-rose-950/50 border border-rose-500/60 flex items-center gap-2 text-xs text-rose-200 shadow-lg">
                 <AlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
                 <span>{authError}</span>
               </div>

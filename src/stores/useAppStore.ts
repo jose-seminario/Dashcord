@@ -1,6 +1,15 @@
 import { create } from 'zustand';
 import { Guild, Message, User, ConnectionStatus } from '../types/discord';
 
+let connectionTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+function clearGatewayTimeout() {
+  if (connectionTimeoutId) {
+    clearTimeout(connectionTimeoutId);
+    connectionTimeoutId = null;
+  }
+}
+
 interface AppState {
   // Navigation & Selection
   selectedGuildId: string;
@@ -139,7 +148,7 @@ const MOCK_MESSAGES: Record<string, Message[]> = {
       id: 'm3',
       channel_id: 'c_general',
       author: MOCK_CURRENT_USER,
-      content: 'Verifiqué las firmas de cabecera: X-Super-Properties está enviando el build 344210 simulando Windows 10 x64. El handshake TLS enmascara perfectamente JA3/JA4.',
+      content: 'Verifiqué las firmas de cabecera: X-Super-Properties está enviando el build 382000 simulando Windows 10 x64. El handshake TLS enmascara perfectamente JA3/JA4.',
       timestamp: 'Hoy a las 10:20',
       reactions: [{ emoji: '🛡️', count: 3, me: true }],
     },
@@ -200,7 +209,7 @@ const MOCK_MEMBERS: Record<string, User[]> = {
   ],
 };
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>((set, get) => ({
   selectedGuildId: 'guild_1',
   selectedChannelId: 'c_general',
   isMembersSidebarOpen: true,
@@ -220,7 +229,7 @@ export const useAppStore = create<AppState>((set) => ({
     gateway: 'disconnected',
     ping: 28,
     tls_spoofed: true,
-    build_number: 344210,
+    build_number: 382000,
   },
 
   accentColor: '#3B82F6',
@@ -243,10 +252,33 @@ export const useAppStore = create<AppState>((set) => ({
   setSettingsOpen: (open) => set({ isSettingsOpen: open }),
   setCommandPaletteOpen: (open) => set({ isCommandPaletteOpen: open }),
 
-  setConnecting: (connecting) => set({ isConnecting: connecting }),
+  setConnecting: (connecting) => {
+    clearGatewayTimeout();
+    set({ isConnecting: connecting });
+
+    if (connecting) {
+      // Timeout de seguridad de 10 segundos si el backend no responde con READY ni ERROR
+      connectionTimeoutId = setTimeout(() => {
+        const current = get();
+        if (current.isConnecting && !current.isAuthenticated) {
+          set((state) => ({
+            isConnecting: false,
+            authError: 'Tiempo de espera agotado. Verifica tu conexión o tu token',
+            isSettingsOpen: true,
+            connectionStatus: {
+              ...state.connectionStatus,
+              gateway: 'disconnected',
+            },
+          }));
+        }
+      }, 10000);
+    }
+  },
+
   setAuthError: (error) => set({ authError: error }),
 
   handleGatewayReady: (payload) => {
+    clearGatewayTimeout();
     const { user, guilds } = payload;
     set((state) => {
       const mergedGuilds = guilds && guilds.length > 0 ? guilds : state.guilds;
@@ -317,6 +349,7 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   handleGatewayError: (error) => {
+    clearGatewayTimeout();
     set((state) => ({
       authError: error,
       isConnecting: false,

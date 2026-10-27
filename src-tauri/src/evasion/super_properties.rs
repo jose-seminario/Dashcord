@@ -26,7 +26,7 @@ impl Default for SuperProperties {
             os_version: "10.0.22631".to_string(),
             os_arch: "x64".to_string(),
             system_locale: "es-ES".to_string(),
-            client_build_number: 344210,
+            client_build_number: 382000,
             native_build_number: None,
             client_event_source: None,
             design_id: 0,
@@ -66,7 +66,7 @@ mod tests {
         
         assert_eq!(parsed["os"], "Windows");
         assert_eq!(parsed["browser"], "Discord Client");
-        assert_eq!(parsed["client_build_number"], 344210);
+        assert_eq!(parsed["client_build_number"], 382000);
     }
 
     #[test]

@@ -96,7 +96,7 @@ impl VersionResolver {
                     let build = cache_opt
                         .as_ref()
                         .map(|c| c.client_build_number)
-                        .unwrap_or(344210);
+                        .unwrap_or(382000);
                     let ver = cache_opt
                         .as_ref()
                         .map(|c| c.client_version.clone())
@@ -132,7 +132,7 @@ impl VersionResolver {
         let html = res.text().await.map_err(|e| e.to_string())?;
 
         // Extraer build number o usar el hash más reciente del script
-        let build_number = Self::extract_build_number(&html).unwrap_or(344210);
+        let build_number = Self::extract_build_number(&html).unwrap_or(382000);
 
         Ok(VersionCache {
             client_build_number: build_number,
