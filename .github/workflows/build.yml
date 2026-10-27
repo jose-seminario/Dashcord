@@ -9,6 +9,8 @@ permissions:
 jobs:
   build-dashcord:
     runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
     steps:
       - name: Checkout repository
@@ -20,8 +22,18 @@ jobs:
           node-version: 20
           cache: 'npm'
 
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Setup NASM for BoringSSL
         uses: ilammy/setup-nasm@v1
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.28.x'
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,19 +69,24 @@ jobs:
 
       - name: Run Backend Unit Tests (SuperProperties & Keychain Mock)
         working-directory: src-tauri
-        shell: bash
-        run: cargo test --workspace --all-features --verbose
+        shell: pwsh
+        run: cargo test --workspace --all-features --verbose --target x86_64-pc-windows-msvc
 
       - name: Build Tauri Application
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target x86_64-pc-windows-msvc
 
       - name: Upload Windows Bundle Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-dashcord
           path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/*.exe
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/*.exe
