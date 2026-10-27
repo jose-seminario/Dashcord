@@ -5,7 +5,7 @@ use audiopus::{
     SampleRate as OpusSampleRate, Signal as OpusSignal,
 };
 use chacha20poly1305::{
-    aead::{AeadInPlace as ChaChaAeadInPlace, KeyInit as ChaChaKeyInit},
+    aead::{AeadInPlace, KeyInit},
     Key as ChaChaKey, XChaCha20Poly1305, XNonce as ChaChaXNonce,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -19,10 +19,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use xsalsa20poly1305::{
-    aead::{AeadInPlace as SalsaAeadInPlace, KeyInit as SalsaKeyInit},
-    Key as SalsaKey, Nonce as SalsaNonce, XSalsa20Poly1305,
-};
+use xsalsa20poly1305::{Key as SalsaKey, Nonce as SalsaNonce, XSalsa20Poly1305};
 
 const TARGET_SAMPLE_RATE: u32 = 48_000;
 const OPUS_FRAME_SAMPLES_MONO: usize = 960; // 20ms @ 48kHz

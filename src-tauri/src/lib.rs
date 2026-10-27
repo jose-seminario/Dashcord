@@ -7,7 +7,7 @@ use core::{DiscordRestClient, GatewayManager};
 use evasion::{SuperProperties, VersionResolver};
 use std::io::Write;
 use storage::KeychainManager;
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 
 pub struct AppConfig {

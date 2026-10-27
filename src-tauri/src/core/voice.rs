@@ -325,6 +325,7 @@ impl VoiceGatewayManager {
         let _ = std::io::stdout().flush();
 
         let mut request = ws_url
+            .clone()
             .into_client_request()
             .map_err(|e| format!("Error creando request de Voice Gateway: {}", e))?;
 
