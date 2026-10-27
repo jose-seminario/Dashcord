@@ -23,8 +23,28 @@ fn get_super_properties() -> Result<SuperProperties, String> {
 }
 
 #[tauri::command]
-fn save_token(config: State<'_, AppConfig>, token: String) -> Result<(), String> {
-    KeychainManager::store_token(&token, config.is_dry_run)
+async fn save_token(
+    app: tauri::AppHandle,
+    config: State<'_, AppConfig>,
+    token: String,
+) -> Result<(), String> {
+    KeychainManager::store_token(&token, config.is_dry_run)?;
+    GatewayManager::start_gateway(app, token, config.is_dry_run).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn connect_saved_token(
+    app: tauri::AppHandle,
+    config: State<'_, AppConfig>,
+) -> Result<bool, String> {
+    match KeychainManager::get_token() {
+        Ok(token) if !token.trim().is_empty() => {
+            GatewayManager::start_gateway(app, token, config.is_dry_run).await;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 #[tauri::command]
@@ -91,6 +111,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_super_properties,
             save_token,
+            connect_saved_token,
             get_token,
             delete_token,
             check_evasion_status,

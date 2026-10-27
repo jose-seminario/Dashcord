@@ -5,6 +5,36 @@ import { useAppStore } from '../../stores/useAppStore';
 export const ServerSidebar: React.FC = () => {
   const { guilds, selectedGuildId, setSelectedGuild } = useAppStore();
 
+  const renderGuildIcon = (guild: { id: string; name: string; icon?: string | null }) => {
+    if (!guild.icon) {
+      return <span>{guild.name.substring(0, 2).toUpperCase()}</span>;
+    }
+
+    if (guild.icon.startsWith('http')) {
+      return (
+        <img
+          src={guild.icon}
+          alt={guild.name}
+          className="w-full h-full rounded-2xl object-cover"
+        />
+      );
+    }
+
+    // Si tiene más de 4 caracteres o formato hash, es un hash de icono de Discord
+    if (guild.icon.length > 4) {
+      return (
+        <img
+          src={`https://cdn.discordapp.com/icons/${guild.id}/${guild.icon}.png?size=64`}
+          alt={guild.name}
+          className="w-full h-full rounded-2xl object-cover"
+        />
+      );
+    }
+
+    // Emoji fallback para datos mockup
+    return <span className="text-xl">{guild.icon}</span>;
+  };
+
   return (
     <aside className="w-[72px] bg-base flex flex-col items-center py-3 gap-2 border-r border-border-subtle z-20 select-none">
       {/* Direct Messages Icon */}
@@ -52,17 +82,13 @@ export const ServerSidebar: React.FC = () => {
                 <button
                   onClick={() => setSelectedGuild(guild.id)}
                   title={guild.name}
-                  className={`w-12 h-12 flex items-center justify-center font-bold text-base transition-all duration-200 relative ${
+                  className={`w-12 h-12 flex items-center justify-center font-bold text-base transition-all duration-200 relative overflow-hidden ${
                     isSelected
                       ? 'bg-surface border-2 border-accent-cyan text-primary rounded-2xl shadow-glow-sm'
                       : 'bg-surface/80 hover:bg-tertiary text-secondary_text hover:text-primary rounded-3xl hover:rounded-2xl border border-border-subtle'
                   }`}
                 >
-                  {guild.icon ? (
-                    <span className="text-xl">{guild.icon}</span>
-                  ) : (
-                    guild.name.substring(0, 2).toUpperCase()
-                  )}
+                  {renderGuildIcon(guild)}
 
                   {/* Unread Badge */}
                   {guild.unread_count && guild.unread_count > 0 ? (

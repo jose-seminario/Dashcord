@@ -1,4 +1,7 @@
 import React, { useEffect } from 'react';
+import { Shield, Loader2, Sparkles, AlertCircle } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { TopBar } from './components/layout/TopBar';
 import { ServerSidebar } from './components/layout/ServerSidebar';
 import { ChannelSidebar } from './components/layout/ChannelSidebar';
@@ -9,7 +12,18 @@ import { SettingsModal } from './components/modals/SettingsModal';
 import { useAppStore } from './stores/useAppStore';
 
 export const App: React.FC = () => {
-  const { uiDensity, reducedMotion } = useAppStore();
+  const {
+    uiDensity,
+    reducedMotion,
+    isConnecting,
+    setConnecting,
+    isAuthenticated,
+    authError,
+    setSettingsOpen,
+    handleGatewayReady,
+    handleGatewayMessage,
+    handleGatewayError,
+  } = useAppStore();
 
   useEffect(() => {
     if (reducedMotion) {
@@ -18,6 +32,64 @@ export const App: React.FC = () => {
       document.documentElement.classList.remove('reduce-motion');
     }
   }, [reducedMotion]);
+
+  useEffect(() => {
+    let unlistenReady: UnlistenFn | undefined;
+    let unlistenMsg: UnlistenFn | undefined;
+    let unlistenErr: UnlistenFn | undefined;
+    let isMounted = true;
+
+    const setupListeners = async () => {
+      try {
+        const uReady = await listen<any>('gateway-ready', (event) => {
+          if (!isMounted) return;
+          handleGatewayReady(event.payload);
+        });
+        if (isMounted) unlistenReady = uReady;
+        else uReady();
+
+        const uMsg = await listen<any>('gateway-message-create', (event) => {
+          if (!isMounted) return;
+          handleGatewayMessage(event.payload);
+        });
+        if (isMounted) unlistenMsg = uMsg;
+        else uMsg();
+
+        const uErr = await listen<any>('gateway-error', (event) => {
+          if (!isMounted) return;
+          const msg =
+            typeof event.payload === 'string'
+              ? event.payload
+              : event.payload?.message || 'Error en la conexión con el Gateway';
+          handleGatewayError(msg);
+        });
+        if (isMounted) unlistenErr = uErr;
+        else uErr();
+
+        // Autoconectar si existe un token previo en el Keychain
+        const hasSaved = await invoke<boolean>('connect_saved_token');
+        if (hasSaved) {
+          setConnecting(true);
+        } else if (!isAuthenticated) {
+          setSettingsOpen(true);
+        }
+      } catch (err) {
+        console.warn('Error en inicialización del Gateway de Tauri:', err);
+        if (isMounted && !isAuthenticated) {
+          setSettingsOpen(true);
+        }
+      }
+    };
+
+    setupListeners();
+
+    return () => {
+      isMounted = false;
+      if (unlistenReady) unlistenReady();
+      if (unlistenMsg) unlistenMsg();
+      if (unlistenErr) unlistenErr();
+    };
+  }, []);
 
   return (
     <div
@@ -29,7 +101,7 @@ export const App: React.FC = () => {
       <TopBar />
 
       {/* Main Multi-Column Split Workspace */}
-      <div className="flex-1 flex min-h-0 overflow-hidden">
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
         {/* Leftmost Server List */}
         <ServerSidebar />
 
@@ -41,6 +113,69 @@ export const App: React.FC = () => {
 
         {/* Right Members Drawer */}
         <MembersSidebar />
+
+        {/* Pantalla de Carga y Conexión en progreso */}
+        {isConnecting && !isAuthenticated && (
+          <div className="absolute inset-0 bg-base/90 backdrop-blur-md z-40 flex flex-col items-center justify-center gap-4 animate-in fade-in duration-200">
+            <div className="relative">
+              <div className="w-16 h-16 rounded-2xl bg-surface border border-accent-cyan/40 shadow-glow-md flex items-center justify-center text-accent-cyan">
+                <Loader2 className="w-8 h-8 animate-spin text-accent-cyan" />
+              </div>
+              <Sparkles className="w-5 h-5 text-accent-ice absolute -top-1 -right-1 animate-pulse" />
+            </div>
+
+            <div className="text-center space-y-1">
+              <h2 className="text-base font-bold text-primary flex items-center justify-center gap-2">
+                <span>Conectando al Gateway v10...</span>
+              </h2>
+              <p className="text-xs text-muted">
+                Estableciendo WebSocket con Jitter y huella TLS suplantada (BoringSSL)
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface/80 border border-border-subtle text-[11px] text-emerald-400 font-mono mt-2">
+              <Shield className="w-3.5 h-3.5 text-accent-cyan" />
+              <span>TLS JA3/JA4 Spoof Activo • Chrome 128 x64</span>
+            </div>
+
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="mt-4 px-4 py-1.5 rounded-lg text-xs text-secondary_text hover:text-primary bg-surface hover:bg-hover border border-border-subtle transition-colors"
+            >
+              Abrir Ajustes de Token
+            </button>
+          </div>
+        )}
+
+        {/* Banner si no hay sesión iniciada y no está conectando */}
+        {!isAuthenticated && !isConnecting && (
+          <div className="absolute inset-0 bg-base/95 backdrop-blur-md z-30 flex flex-col items-center justify-center gap-4 p-6">
+            <div className="w-16 h-16 rounded-2xl bg-surface border border-border-subtle flex items-center justify-center text-accent-primary shadow-glow-sm">
+              <Shield className="w-8 h-8 text-accent-cyan" />
+            </div>
+
+            <div className="text-center max-w-sm space-y-2">
+              <h2 className="text-lg font-bold text-primary">Bienvenido a DashCord</h2>
+              <p className="text-xs text-muted leading-relaxed">
+                Para comenzar a recibir tus servidores, canales y mensajes en tiempo real, ingresa tu Discord User Token en los ajustes.
+              </p>
+            </div>
+
+            {authError && (
+              <div className="p-3 max-w-sm rounded-lg bg-rose-950/40 border border-rose-500/50 flex items-center gap-2 text-xs text-rose-300">
+                <AlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="px-5 py-2.5 bg-accent-primary hover:bg-accent-cyan text-white text-xs font-semibold rounded-xl shadow-glow-md transition-all duration-150 cursor-pointer"
+            >
+              Configurar Token de Usuario
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Global Command Center (Ctrl+K) */}

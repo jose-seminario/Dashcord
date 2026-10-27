@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Shield,
@@ -8,7 +8,10 @@ import {
   CheckCircle2,
   AlertTriangle,
   Lock,
+  Loader2,
+  Trash2,
 } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../../stores/useAppStore';
 
 export const SettingsModal: React.FC = () => {
@@ -22,12 +25,67 @@ export const SettingsModal: React.FC = () => {
     setUiDensity,
     reducedMotion,
     setReducedMotion,
+    isConnecting,
+    setConnecting,
+    authError,
+    setAuthError,
   } = useAppStore();
 
   const [activeTab, setActiveTab] = useState<'evasion' | 'appearance' | 'account' | 'perf'>('evasion');
   const [tokenInput, setTokenInput] = useState('');
+  const [hasSavedToken, setHasSavedToken] = useState(false);
+
+  useEffect(() => {
+    if (isSettingsOpen) {
+      invoke<string>('get_token')
+        .then((tok) => {
+          if (tok && tok.trim().length > 0) {
+            setHasSavedToken(true);
+            if (!tokenInput) {
+              setTokenInput(tok);
+            }
+          }
+        })
+        .catch(() => {
+          setHasSavedToken(false);
+        });
+    }
+  }, [isSettingsOpen]);
+
+  // Si hay un error de autenticación, enfocar automáticamente en la pestaña account
+  useEffect(() => {
+    if (authError) {
+      setActiveTab('account');
+    }
+  }, [authError]);
 
   if (!isSettingsOpen) return null;
+
+  const handleSaveToken = async () => {
+    if (!tokenInput.trim() || isConnecting) return;
+    setAuthError(null);
+    setConnecting(true);
+
+    try {
+      await invoke('save_token', { token: tokenInput.trim() });
+      setHasSavedToken(true);
+    } catch (err: any) {
+      const errMsg = typeof err === 'string' ? err : err?.message || 'Error al conectar al Gateway';
+      setAuthError(errMsg);
+      setConnecting(false);
+    }
+  };
+
+  const handleDeleteToken = async () => {
+    try {
+      await invoke('delete_token');
+      setTokenInput('');
+      setHasSavedToken(false);
+      setAuthError(null);
+    } catch (err: any) {
+      setAuthError(typeof err === 'string' ? err : 'Error al eliminar credencial');
+    }
+  };
 
   const ACCENT_PRESETS = [
     { name: 'Electric Blue', hex: '#3B82F6' },
@@ -82,6 +140,7 @@ export const SettingsModal: React.FC = () => {
             >
               <KeyRound className="w-4 h-4" />
               <span>Cuenta & Keychain</span>
+              {authError && <span className="w-2 h-2 rounded-full bg-rose-500 ml-auto" />}
             </button>
 
             <button
@@ -132,7 +191,7 @@ export const SettingsModal: React.FC = () => {
                       Transporte TLS y Fingerprint JA3/JA4 Activos
                     </p>
                     <p className="text-emerald-200/80">
-                      Tus peticiones utilizan el cliente con BoringSSL (`rquest`). Discord recibe la firma exacta de Google Chrome 128 / Discord Desktop x64.
+                      Tus peticiones utilizan el cliente con BoringSSL (`wreq`). Discord recibe la firma exacta de Google Chrome 128 / Discord Desktop x64.
                     </p>
                   </div>
                 </div>
@@ -249,6 +308,17 @@ export const SettingsModal: React.FC = () => {
                   </div>
                 </div>
 
+                {/* Error Banner si el token es inválido */}
+                {authError && (
+                  <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-500/50 flex items-start gap-3 text-xs text-rose-200 animate-in fade-in">
+                    <AlertTriangle className="w-5 h-5 text-rose-400 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-semibold text-rose-300">Error de Conexión / Autenticación</p>
+                      <p className="mt-0.5 text-rose-200/90">{authError}</p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-secondary_text">
                     Token de Usuario (Discord User Token)
@@ -257,19 +327,44 @@ export const SettingsModal: React.FC = () => {
                     <input
                       type="password"
                       value={tokenInput}
-                      onChange={(e) => setTokenInput(e.target.value)}
-                      placeholder="Pega tu token aquí para la Fase 2.5..."
-                      className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-2 text-xs font-mono text-primary placeholder-muted outline-none focus:border-accent-primary"
+                      onChange={(e) => {
+                        setTokenInput(e.target.value);
+                        if (authError) setAuthError(null);
+                      }}
+                      placeholder="Pega tu token de usuario aquí..."
+                      disabled={isConnecting}
+                      className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-2 text-xs font-mono text-primary placeholder-muted outline-none focus:border-accent-primary disabled:opacity-50"
                     />
                     <button
-                      onClick={() => alert('Listo para registrar en Keychain en la Fase 2.5')}
-                      className="px-4 py-2 bg-accent-primary hover:bg-accent-cyan text-white text-xs font-medium rounded-lg transition-colors shadow-glow-sm"
+                      onClick={handleSaveToken}
+                      disabled={isConnecting || !tokenInput.trim()}
+                      className={`px-4 py-2 text-white text-xs font-medium rounded-lg transition-all flex items-center gap-2 ${
+                        isConnecting || !tokenInput.trim()
+                          ? 'bg-accent-primary/50 cursor-not-allowed text-muted'
+                          : 'bg-accent-primary hover:bg-accent-cyan shadow-glow-sm cursor-pointer'
+                      }`}
                     >
-                      Guardar en Keychain
+                      {isConnecting ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Conectando...</span>
+                        </>
+                      ) : (
+                        <span>Guardar en Keychain</span>
+                      )}
                     </button>
+                    {hasSavedToken && !isConnecting && (
+                      <button
+                        onClick={handleDeleteToken}
+                        title="Eliminar credencial guardada"
+                        className="p-2 text-rose-400 hover:text-rose-300 hover:bg-rose-950/30 rounded-lg border border-rose-500/30 transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                   <p className="text-[11px] text-muted">
-                    Nunca compartas tu token con nadie. DashCord no envía tu token a ningún servidor que no sea `discord.com/api/v10`.
+                    Nunca compartas tu token con nadie. DashCord no envía tu token a ningún servidor que no sea `discord.com/api/v10` ni `gateway.discord.gg`.
                   </p>
                 </div>
               </div>

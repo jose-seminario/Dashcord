@@ -9,6 +9,11 @@ interface AppState {
   isSettingsOpen: boolean;
   isCommandPaletteOpen: boolean;
 
+  // Connection & Auth
+  isConnecting: boolean;
+  isAuthenticated: boolean;
+  authError: string | null;
+
   // Mock / Real Data
   currentUser: User;
   guilds: Guild[];
@@ -31,6 +36,12 @@ interface AppState {
   setAccentColor: (color: string) => void;
   setUiDensity: (density: 'compact' | 'comfortable') => void;
   setReducedMotion: (reduced: boolean) => void;
+
+  setConnecting: (connecting: boolean) => void;
+  setAuthError: (error: string | null) => void;
+  handleGatewayReady: (payload: { user: User; guilds: Guild[] }) => void;
+  handleGatewayMessage: (rawMessage: any) => void;
+  handleGatewayError: (error: string) => void;
 }
 
 const MOCK_CURRENT_USER: User = {
@@ -144,7 +155,7 @@ const MOCK_MESSAGES: Record<string, Message[]> = {
         global_name: 'Ferris',
         status: 'dnd',
       },
-      content: 'La arquitectura modular con Tauri 2.0 y el crate rquest permite controlar cada byte del handshake TLS.',
+      content: 'La arquitectura modular con Tauri 2.0 y el crate wreq permite controlar cada byte del handshake TLS.',
       timestamp: 'Ayer a las 22:45',
     },
   ],
@@ -196,13 +207,17 @@ export const useAppStore = create<AppState>((set) => ({
   isSettingsOpen: false,
   isCommandPaletteOpen: false,
 
+  isConnecting: false,
+  isAuthenticated: false,
+  authError: null,
+
   currentUser: MOCK_CURRENT_USER,
   guilds: MOCK_GUILDS,
   messages: MOCK_MESSAGES,
   members: MOCK_MEMBERS,
 
   connectionStatus: {
-    gateway: 'connected',
+    gateway: 'disconnected',
     ping: 28,
     tls_spoofed: true,
     build_number: 344210,
@@ -227,6 +242,91 @@ export const useAppStore = create<AppState>((set) => ({
   toggleMembersSidebar: () => set((state) => ({ isMembersSidebarOpen: !state.isMembersSidebarOpen })),
   setSettingsOpen: (open) => set({ isSettingsOpen: open }),
   setCommandPaletteOpen: (open) => set({ isCommandPaletteOpen: open }),
+
+  setConnecting: (connecting) => set({ isConnecting: connecting }),
+  setAuthError: (error) => set({ authError: error }),
+
+  handleGatewayReady: (payload) => {
+    const { user, guilds } = payload;
+    set((state) => {
+      const mergedGuilds = guilds && guilds.length > 0 ? guilds : state.guilds;
+      const initialGuildId = mergedGuilds[0]?.id || '';
+      const initialChannelId = mergedGuilds[0]?.channels[0]?.id || '';
+
+      const updatedUser: User = {
+        ...state.currentUser,
+        ...user,
+        avatar: user.avatar
+          ? (user.avatar.startsWith('http')
+              ? user.avatar
+              : `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`)
+          : state.currentUser.avatar,
+      };
+
+      return {
+        currentUser: updatedUser,
+        guilds: mergedGuilds,
+        selectedGuildId: initialGuildId,
+        selectedChannelId: initialChannelId,
+        isAuthenticated: true,
+        isConnecting: false,
+        authError: null,
+        isSettingsOpen: false,
+        connectionStatus: {
+          ...state.connectionStatus,
+          gateway: 'connected',
+        },
+      };
+    });
+  },
+
+  handleGatewayMessage: (raw) => {
+    if (!raw || !raw.channel_id) return;
+    const authorUser: User = {
+      id: raw.author?.id || 'unknown',
+      username: raw.author?.username || 'Usuario',
+      discriminator: raw.author?.discriminator || '0000',
+      global_name: raw.author?.global_name || raw.author?.username,
+      avatar: raw.author?.avatar
+        ? `https://cdn.discordapp.com/avatars/${raw.author.id}/${raw.author.avatar}.png?size=128`
+        : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=128',
+      status: 'online',
+    };
+
+    const newMsg: Message = {
+      id: raw.id || `msg_${Date.now()}`,
+      channel_id: raw.channel_id,
+      author: authorUser,
+      content: raw.content || '',
+      timestamp: raw.timestamp
+        ? new Date(raw.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : 'Ahora',
+      attachments: raw.attachments,
+      reactions: raw.reactions,
+    };
+
+    set((state) => {
+      const currentList = state.messages[raw.channel_id] || [];
+      return {
+        messages: {
+          ...state.messages,
+          [raw.channel_id]: [...currentList, newMsg],
+        },
+      };
+    });
+  },
+
+  handleGatewayError: (error) => {
+    set((state) => ({
+      authError: error,
+      isConnecting: false,
+      isSettingsOpen: true,
+      connectionStatus: {
+        ...state.connectionStatus,
+        gateway: 'disconnected',
+      },
+    }));
+  },
 
   sendMessage: (channelId, content) => {
     if (!content.trim()) return;

@@ -39,6 +39,12 @@ export const ChannelSidebar: React.FC = () => {
     }
   };
 
+  const userAvatarSrc = currentUser.avatar
+    ? (currentUser.avatar.startsWith('http')
+        ? currentUser.avatar
+        : `https://cdn.discordapp.com/avatars/${currentUser.id}/${currentUser.avatar}.png?size=128`)
+    : 'https://images.unsplash.com/photo-1566492031773-4f4e44671857?w=128';
+
   return (
     <nav className="w-60 bg-surface flex flex-col border-r border-border-subtle select-none">
       {/* Guild Header Dropdown */}
@@ -52,29 +58,36 @@ export const ChannelSidebar: React.FC = () => {
       {/* Channels List */}
       <div className="flex-1 overflow-y-auto px-2 py-3 space-y-1">
         <div className="text-[11px] font-bold text-muted uppercase tracking-wider px-2 py-1 flex items-center justify-between">
-          <span>Canales de Texto</span>
+          <span>Canales de Texto y Voz</span>
+          <span className="text-[10px] text-muted/60">{channels.length}</span>
         </div>
 
-        {channels.map((channel) => {
-          const isSelected = selectedChannelId === channel.id;
-          return (
-            <button
-              key={channel.id}
-              onClick={() => setSelectedChannel(channel.id)}
-              className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-sm transition-all duration-150 ${
-                isSelected
-                  ? 'bg-active text-primary font-medium border-l-2 border-accent-cyan'
-                  : 'text-secondary_text hover:text-primary hover:bg-hover'
-              }`}
-            >
-              {getChannelIcon(channel.type)}
-              <span className="truncate">{channel.name}</span>
-              {channel.unread && !isSelected && (
-                <div className="w-1.5 h-1.5 rounded-full bg-accent-cyan ml-auto" />
-              )}
-            </button>
-          );
-        })}
+        {channels.length === 0 ? (
+          <div className="p-3 text-xs text-muted text-center italic">
+            No hay canales disponibles
+          </div>
+        ) : (
+          channels.map((channel) => {
+            const isSelected = selectedChannelId === channel.id;
+            return (
+              <button
+                key={channel.id}
+                onClick={() => setSelectedChannel(channel.id)}
+                className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-sm transition-all duration-150 ${
+                  isSelected
+                    ? 'bg-active text-primary font-medium border-l-2 border-accent-cyan'
+                    : 'text-secondary_text hover:text-primary hover:bg-hover'
+                }`}
+              >
+                {getChannelIcon(channel.type)}
+                <span className="truncate">{channel.name}</span>
+                {channel.unread && !isSelected && (
+                  <div className="w-1.5 h-1.5 rounded-full bg-accent-cyan ml-auto" />
+                )}
+              </button>
+            );
+          })
+        )}
       </div>
 
       {/* User Bottom Status Card */}
@@ -82,7 +95,7 @@ export const ChannelSidebar: React.FC = () => {
         <div className="flex items-center gap-2 min-w-0">
           <div className="relative">
             <img
-              src={currentUser.avatar || ''}
+              src={userAvatarSrc}
               alt={currentUser.username}
               className="w-8 h-8 rounded-full object-cover border border-border-subtle"
             />
