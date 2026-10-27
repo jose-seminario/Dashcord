@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Shield,
@@ -34,6 +34,7 @@ export const SettingsModal: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'evasion' | 'appearance' | 'account' | 'perf'>('evasion');
   const [tokenInput, setTokenInput] = useState('');
   const [hasSavedToken, setHasSavedToken] = useState(false);
+  const isSubmittingRef = useRef(false);
 
   useEffect(() => {
     if (isSettingsOpen) {
@@ -62,7 +63,8 @@ export const SettingsModal: React.FC = () => {
   if (!isSettingsOpen) return null;
 
   const handleSaveToken = async () => {
-    if (!tokenInput.trim() || isConnecting) return;
+    if (!tokenInput.trim() || isConnecting || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setAuthError(null);
     setConnecting(true);
 
@@ -73,6 +75,8 @@ export const SettingsModal: React.FC = () => {
       const errMsg = typeof err === 'string' ? err : err?.message || 'Error al conectar al Gateway';
       setAuthError(errMsg);
       setConnecting(false);
+    } finally {
+      isSubmittingRef.current = false;
     }
   };
 

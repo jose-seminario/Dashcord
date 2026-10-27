@@ -279,8 +279,18 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   handleGatewayReady: (payload) => {
     clearGatewayTimeout();
+    if (!payload || !payload.user) return;
     const { user, guilds } = payload;
+
     set((state) => {
+      // Si ya estamos autenticados con el mismo usuario y ya cerramos el modal, evitar reinicializar la selección actual
+      if (state.isAuthenticated && state.currentUser.id === user.id && !state.isConnecting) {
+        return {
+          isConnecting: false,
+          authError: null,
+        };
+      }
+
       const mergedGuilds = guilds && guilds.length > 0 ? guilds : state.guilds;
       const initialGuildId = mergedGuilds[0]?.id || '';
       const initialChannelId = mergedGuilds[0]?.channels[0]?.id || '';
@@ -314,6 +324,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   handleGatewayMessage: (raw) => {
     if (!raw || !raw.channel_id) return;
+    const msgId = raw.id || `msg_${Date.now()}`;
+
     const authorUser: User = {
       id: raw.author?.id || 'unknown',
       username: raw.author?.username || 'Usuario',
@@ -326,7 +338,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
 
     const newMsg: Message = {
-      id: raw.id || `msg_${Date.now()}`,
+      id: msgId,
       channel_id: raw.channel_id,
       author: authorUser,
       content: raw.content || '',
@@ -339,6 +351,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     set((state) => {
       const currentList = state.messages[raw.channel_id] || [];
+      // Evitar duplicados si el mensaje llega por múltiples vías IPC
+      if (currentList.some((m) => m.id === msgId)) {
+        return state;
+      }
       return {
         messages: {
           ...state.messages,
@@ -353,6 +369,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({
       authError: error,
       isConnecting: false,
+      isAuthenticated: false,
       isSettingsOpen: true,
       connectionStatus: {
         ...state.connectionStatus,

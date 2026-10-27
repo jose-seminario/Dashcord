@@ -11,6 +11,9 @@ import { CommandPalette } from './components/modals/CommandPalette';
 import { SettingsModal } from './components/modals/SettingsModal';
 import { useAppStore } from './stores/useAppStore';
 
+// Evita doble autoconexión en modo React.StrictMode
+let initialAutoConnectTriggered = false;
+
 export const App: React.FC = () => {
   const {
     uiDensity,
@@ -20,9 +23,6 @@ export const App: React.FC = () => {
     isAuthenticated,
     authError,
     setSettingsOpen,
-    handleGatewayReady,
-    handleGatewayMessage,
-    handleGatewayError,
   } = useAppStore();
 
   useEffect(() => {
@@ -33,67 +33,154 @@ export const App: React.FC = () => {
     }
   }, [reducedMotion]);
 
+  // 1. Listeners globales (DOM CustomEvents inyectados por Rust + Tauri v2 Event API)
   useEffect(() => {
     let unlistenReady: UnlistenFn | undefined;
     let unlistenMsg: UnlistenFn | undefined;
     let unlistenErr: UnlistenFn | undefined;
     let isMounted = true;
 
-    const setupListeners = async () => {
+    // A) Listeners DOM nativos síncronos (canal directo desde window.eval en Rust)
+    const onDomReady = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      if (customEvt.detail) {
+        console.log('[IPC DOM] dashcord:gateway-ready recibido:', customEvt.detail);
+        useAppStore.getState().handleGatewayReady(customEvt.detail);
+      }
+    };
+
+    const onDomMessage = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      if (customEvt.detail) {
+        useAppStore.getState().handleGatewayMessage(customEvt.detail);
+      }
+    };
+
+    const onDomError = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      const detail = customEvt.detail;
+      const msg =
+        typeof detail === 'string'
+          ? detail
+          : detail?.message || 'Error en la conexión con el Gateway';
+      console.error('[IPC DOM] dashcord:gateway-error recibido:', msg);
+      useAppStore.getState().handleGatewayError(msg);
+    };
+
+    window.addEventListener('dashcord:gateway-ready', onDomReady);
+    window.addEventListener('dashcord:gateway-message-create', onDomMessage);
+    window.addEventListener('dashcord:gateway-error', onDomError);
+
+    // B) Listeners de la API de eventos de Tauri v2 (@tauri-apps/api/event)
+    const setupTauriListeners = async () => {
       try {
         const uReady = await listen<any>('gateway-ready', (event) => {
           if (!isMounted) return;
-          console.log('[FRONTEND] Evento gateway-ready recibido:', event.payload);
-          handleGatewayReady(event.payload);
+          console.log('[IPC TAURI] gateway-ready recibido:', event.payload);
+          useAppStore.getState().handleGatewayReady(event.payload);
         });
         if (isMounted) unlistenReady = uReady;
         else uReady();
+      } catch (err) {
+        console.warn('[IPC TAURI] Aviso al registrar listener gateway-ready:', err);
+      }
 
+      try {
         const uMsg = await listen<any>('gateway-message-create', (event) => {
           if (!isMounted) return;
-          handleGatewayMessage(event.payload);
+          useAppStore.getState().handleGatewayMessage(event.payload);
         });
         if (isMounted) unlistenMsg = uMsg;
         else uMsg();
+      } catch (err) {
+        console.warn('[IPC TAURI] Aviso al registrar listener gateway-message-create:', err);
+      }
 
+      try {
         const uErr = await listen<any>('gateway-error', (event) => {
           if (!isMounted) return;
           const msg =
             typeof event.payload === 'string'
               ? event.payload
               : event.payload?.message || 'Error en la conexión con el Gateway';
-          console.error('[FRONTEND] Evento gateway-error recibido:', msg);
-          handleGatewayError(msg);
+          console.error('[IPC TAURI] gateway-error recibido:', msg);
+          useAppStore.getState().handleGatewayError(msg);
         });
         if (isMounted) unlistenErr = uErr;
         else uErr();
-
-        // Verificar si existe token en Keychain antes de lanzar conexión
-        const savedToken = await invoke<string>('get_token').catch(() => '');
-        if (savedToken && savedToken.trim().length > 0) {
-          setConnecting(true);
-          await invoke<boolean>('connect_saved_token');
-        } else if (!isAuthenticated) {
-          setSettingsOpen(true);
-        }
       } catch (err) {
-        console.warn('Error en inicialización del Gateway de Tauri:', err);
-        if (isMounted && !isAuthenticated) {
-          setConnecting(false);
-          setSettingsOpen(true);
+        console.warn('[IPC TAURI] Aviso al registrar listener gateway-error:', err);
+      }
+
+      // C) Autoconexión única al iniciar si existe un token en el Keychain
+      if (!initialAutoConnectTriggered) {
+        initialAutoConnectTriggered = true;
+        try {
+          const savedToken = await invoke<string>('get_token').catch(() => '');
+          if (savedToken && savedToken.trim().length > 0) {
+            useAppStore.getState().setConnecting(true);
+            await invoke<boolean>('connect_saved_token');
+          } else if (!useAppStore.getState().isAuthenticated) {
+            useAppStore.getState().setSettingsOpen(true);
+          }
+        } catch (err) {
+          console.warn('No se pudo autoconectar con token previo:', err);
+          if (isMounted && !useAppStore.getState().isAuthenticated) {
+            useAppStore.getState().setConnecting(false);
+            useAppStore.getState().setSettingsOpen(true);
+          }
         }
       }
     };
 
-    setupListeners();
+    setupTauriListeners();
 
     return () => {
       isMounted = false;
+      window.removeEventListener('dashcord:gateway-ready', onDomReady);
+      window.removeEventListener('dashcord:gateway-message-create', onDomMessage);
+      window.removeEventListener('dashcord:gateway-error', onDomError);
       if (unlistenReady) unlistenReady();
       if (unlistenMsg) unlistenMsg();
       if (unlistenErr) unlistenErr();
     };
   }, []);
+
+  // 2. Respaldo de sincronización por comando IPC (`get_gateway_snapshot`)
+  // Garantiza que si el evento READY ocurrió en milisegundos, React lo reciba inmediatamente
+  useEffect(() => {
+    const intervalMs = isConnecting ? 300 : 1200;
+    const timer = setInterval(async () => {
+      try {
+        const snap = await invoke<{
+          status: string;
+          ready_payload?: any;
+          error_message?: string;
+          recent_messages?: any[];
+        }>('get_gateway_snapshot');
+
+        const state = useAppStore.getState();
+
+        if (snap.status === 'ready' && snap.ready_payload && !state.isAuthenticated) {
+          console.log('[IPC SNAPSHOT] READY sincronizado desde backend:', snap.ready_payload);
+          state.handleGatewayReady(snap.ready_payload);
+        } else if (snap.status === 'error' && snap.error_message && state.isConnecting) {
+          console.error('[IPC SNAPSHOT] Error sincronizado desde backend:', snap.error_message);
+          state.handleGatewayError(snap.error_message);
+        }
+
+        if (snap.recent_messages && snap.recent_messages.length > 0) {
+          for (const msg of snap.recent_messages) {
+            state.handleGatewayMessage(msg);
+          }
+        }
+      } catch {
+        // Ignorar errores silenciosos de polling
+      }
+    }, intervalMs);
+
+    return () => clearInterval(timer);
+  }, [isConnecting, isAuthenticated]);
 
   return (
     <div

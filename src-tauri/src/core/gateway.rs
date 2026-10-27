@@ -4,9 +4,9 @@ use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
-use std::time::Duration;
-use tauri::Emitter;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async_with_config;
@@ -18,6 +18,64 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const CHROME_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9168 Chrome/128.0.6613.186 Electron/32.2.2 Safari/537.36";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Estado compartido accesible por comando IPC directo (fallback a prueba de fallos)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GatewaySnapshot {
+    pub status: String, // "idle" | "connecting" | "ready" | "error"
+    pub ready_payload: Option<FrontendReadyPayload>,
+    pub error_message: Option<String>,
+    pub recent_messages: Vec<serde_json::Value>,
+}
+
+static SHARED_SNAPSHOT: OnceLock<std::sync::Mutex<GatewaySnapshot>> = OnceLock::new();
+static ACTIVE_ABORT_HANDLE: OnceLock<std::sync::Mutex<Option<tokio::task::AbortHandle>>> =
+    OnceLock::new();
+static LAST_CONNECT_ATTEMPT: OnceLock<std::sync::Mutex<Option<(String, Instant)>>> =
+    OnceLock::new();
+
+fn snapshot_lock() -> &'static std::sync::Mutex<GatewaySnapshot> {
+    SHARED_SNAPSHOT.get_or_init(|| {
+        std::sync::Mutex::new(GatewaySnapshot {
+            status: "idle".to_string(),
+            ready_payload: None,
+            error_message: None,
+            recent_messages: Vec::new(),
+        })
+    })
+}
+
+fn abort_lock() -> &'static std::sync::Mutex<Option<tokio::task::AbortHandle>> {
+    ACTIVE_ABORT_HANDLE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn attempt_lock() -> &'static std::sync::Mutex<Option<(String, Instant)>> {
+    LAST_CONNECT_ATTEMPT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Emite un evento al frontend usando simultáneamente:
+/// 1) `app.emit` global (Tauri v2 Emitter)
+/// 2) `window.emit` directo a la ventana "main"
+/// 3) `window.eval` despachando un CustomEvent DOM nativo en el WebView
+fn emit_ipc_event<S: Serialize + Clone>(app: &tauri::AppHandle, event_name: &str, payload: &S) {
+    match app.emit(event_name, payload.clone()) {
+        Ok(_) => println!("[IPC] Evento '{}' emitido globalmente (app.emit OK)", event_name),
+        Err(e) => eprintln!("[IPC WARN] Error en app.emit('{}'): {}", event_name, e),
+    }
+
+    if let Some(main_win) = app.get_webview_window("main") {
+        let _ = main_win.emit(event_name, payload.clone());
+
+        if let Ok(json_str) = serde_json::to_string(payload) {
+            let js_code = format!(
+                "window.dispatchEvent(new CustomEvent('dashcord:{}', {{ detail: {} }}));",
+                event_name, json_str
+            );
+            let _ = main_win.eval(&js_code);
+        }
+    }
+    let _ = std::io::stdout().flush();
+}
 
 /// Generador de jitter pseudoaleatorio basado en nanosegundos y xorshift
 /// Devuelve un factor entre 0.05 y 0.95
@@ -69,6 +127,18 @@ impl GatewayManager {
         }
     }
 
+    /// Devuelve una copia instantánea del estado actual del Gateway para consulta directa desde React
+    pub fn get_snapshot() -> GatewaySnapshot {
+        if let Ok(mut guard) = snapshot_lock().lock() {
+            let snap = guard.clone();
+            // Limpiar cola de mensajes recientes una vez entregados al frontend
+            guard.recent_messages.clear();
+            snap
+        } else {
+            GatewaySnapshot::default()
+        }
+    }
+
     /// Mantiene compatibilidad con las pruebas unitarias del backend
     pub async fn start_session(&mut self) -> Result<String, String> {
         if self.state.is_dry_run {
@@ -83,11 +153,56 @@ impl GatewayManager {
         Ok("session_active".to_string())
     }
 
-    /// Inicia la conexión real al Gateway v10 en una tarea asíncrona de Tokio con captura de pánicos
-    pub async fn start_gateway(app: tauri::AppHandle, token: String, is_dry_run: bool) {
-        tokio::spawn(async move {
+    /// Inicia la conexión real al Gateway v10 asegurando una única instancia activa
+    pub async fn start_gateway(app: tauri::AppHandle, raw_token: String, is_dry_run: bool) {
+        let clean_token = raw_token
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim()
+            .to_string();
+
+        // Evitar ejecuciones duplicadas en ráfaga (< 3 segundos con el mismo token)
+        if let Ok(mut attempt_guard) = attempt_lock().lock() {
+            if let Some((ref prev_token, prev_instant)) = *attempt_guard {
+                if prev_token == &clean_token && prev_instant.elapsed() < Duration::from_secs(3) {
+                    println!(
+                        "[GATEWAY] Ignorando llamada duplicada a start_gateway ({}ms desde la anterior).",
+                        prev_instant.elapsed().as_millis()
+                    );
+                    let _ = std::io::stdout().flush();
+
+                    // Si ya teníamos el payload READY listo, re-emitirlo inmediatamente al frontend
+                    if let Ok(snap) = snapshot_lock().lock() {
+                        if snap.status == "ready" {
+                            if let Some(ref ready_data) = snap.ready_payload {
+                                emit_ipc_event(&app, "gateway-ready", ready_data);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            *attempt_guard = Some((clean_token.clone(), Instant::now()));
+        }
+
+        // Si había una tarea anterior del Gateway corriendo, abortarla limpiamente antes de abrir otra
+        if let Ok(mut abort_guard) = abort_lock().lock() {
+            if let Some(prev_handle) = abort_guard.take() {
+                println!("[GATEWAY] Abortando sesión anterior del Gateway antes de reconectar...");
+                prev_handle.abort();
+            }
+        }
+
+        // Actualizar snapshot a "connecting"
+        if let Ok(mut snap) = snapshot_lock().lock() {
+            snap.status = "connecting".to_string();
+            snap.error_message = None;
+        }
+
+        let join_handle = tokio::spawn(async move {
             let app_clone = app.clone();
-            let result = AssertUnwindSafe(Self::connect_and_listen(app, token, is_dry_run))
+            let result = AssertUnwindSafe(Self::connect_and_listen(app, clean_token, is_dry_run))
                 .catch_unwind()
                 .await;
 
@@ -96,7 +211,12 @@ impl GatewayManager {
                 Ok(Err(e)) => {
                     eprintln!("[GATEWAY ERROR] Detenido con error: {}", e);
                     let _ = std::io::stderr().flush();
-                    let _ = app_clone.emit("gateway-error", serde_json::json!({ "message": e }));
+                    if let Ok(mut snap) = snapshot_lock().lock() {
+                        snap.status = "error".to_string();
+                        snap.error_message = Some(e.clone());
+                    }
+                    let err_payload = serde_json::json!({ "message": e });
+                    emit_ipc_event(&app_clone, "gateway-error", &err_payload);
                 }
                 Err(panic_payload) => {
                     let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
@@ -106,29 +226,29 @@ impl GatewayManager {
                     } else {
                         "Fallo crítico inesperado en tarea del Gateway".to_string()
                     };
-                    eprintln!("[GATEWAY PANIC] {}", panic_msg);
+                    let full_err = format!("Error interno del Gateway: {}", panic_msg);
+                    eprintln!("[GATEWAY PANIC] {}", full_err);
                     let _ = std::io::stderr().flush();
-                    let _ = app_clone.emit(
-                        "gateway-error",
-                        serde_json::json!({ "message": format!("Error interno del Gateway: {}", panic_msg) }),
-                    );
+                    if let Ok(mut snap) = snapshot_lock().lock() {
+                        snap.status = "error".to_string();
+                        snap.error_message = Some(full_err.clone());
+                    }
+                    let err_payload = serde_json::json!({ "message": full_err });
+                    emit_ipc_event(&app_clone, "gateway-error", &err_payload);
                 }
             }
         });
+
+        if let Ok(mut abort_guard) = abort_lock().lock() {
+            *abort_guard = Some(join_handle.abort_handle());
+        }
     }
 
     async fn connect_and_listen(
         app: tauri::AppHandle,
-        raw_token: String,
+        token: String,
         is_dry_run: bool,
     ) -> Result<(), String> {
-        let token = raw_token
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .trim()
-            .to_string();
-
         if token.is_empty() {
             return Err("El token proporcionado está vacío.".to_string());
         }
@@ -175,7 +295,12 @@ impl GatewayManager {
                 }],
             };
 
-            let _ = app.emit("gateway-ready", &mock_payload);
+            if let Ok(mut snap) = snapshot_lock().lock() {
+                snap.status = "ready".to_string();
+                snap.ready_payload = Some(mock_payload.clone());
+                snap.error_message = None;
+            }
+            emit_ipc_event(&app, "gateway-ready", &mock_payload);
             return Ok(());
         }
 
@@ -228,7 +353,8 @@ impl GatewayManager {
                 return Err(err);
             }
             Err(_) => {
-                let err = "Tiempo de espera agotado al conectar con Discord Gateway (10s)".to_string();
+                let err =
+                    "Tiempo de espera agotado al conectar con Discord Gateway (10s)".to_string();
                 eprintln!("[GATEWAY ERROR] {}", err);
                 let _ = std::io::stderr().flush();
                 return Err(err);
@@ -268,7 +394,12 @@ impl GatewayManager {
                     eprintln!("[GATEWAY ERROR] {}", err_msg);
                     let _ = std::io::stderr().flush();
                     if !ready_received {
-                        let _ = app.emit("gateway-error", serde_json::json!({ "message": err_msg }));
+                        if let Ok(mut snap) = snapshot_lock().lock() {
+                            snap.status = "error".to_string();
+                            snap.error_message = Some(err_msg.clone());
+                        }
+                        let payload = serde_json::json!({ "message": err_msg });
+                        emit_ipc_event(&app, "gateway-error", &payload);
                         error_emitted = true;
                     }
                     break;
@@ -283,31 +414,28 @@ impl GatewayManager {
 
             // Manejo de Close Frame
             if let WsMessage::Close(ref frame) = msg {
-                if let Some(cf) = frame {
+                let err_msg = if let Some(cf) = frame {
                     let code: u16 = cf.code.into();
                     let reason = cf.reason.to_string();
                     if code == 4004 {
-                        let err_msg = "Token inválido o expirado";
-                        println!("[GATEWAY ERROR] Código 4004: {}", err_msg);
-                        eprintln!("[GATEWAY ERROR] Código 4004: {}", err_msg);
-                        let _ = std::io::stderr().flush();
-                        let _ = app.emit("gateway-error", serde_json::json!({ "message": err_msg }));
+                        "Token inválido o expirado".to_string()
                     } else {
-                        let err_msg = format!(
-                            "Conexión cerrada por Discord (código {}: {})",
-                            code, reason
-                        );
-                        println!("[GATEWAY] {}", err_msg);
-                        eprintln!("[GATEWAY] {}", err_msg);
-                        let _ = std::io::stderr().flush();
-                        let _ = app.emit("gateway-error", serde_json::json!({ "message": err_msg }));
+                        format!("Conexión cerrada por Discord (código {}: {})", code, reason)
                     }
                 } else {
-                    let err_msg = "El Gateway cerró la conexión inesperadamente.";
-                    eprintln!("[GATEWAY] {}", err_msg);
-                    let _ = std::io::stderr().flush();
-                    let _ = app.emit("gateway-error", serde_json::json!({ "message": err_msg }));
+                    "El Gateway cerró la conexión inesperadamente.".to_string()
+                };
+
+                println!("[GATEWAY ERROR] {}", err_msg);
+                eprintln!("[GATEWAY ERROR] {}", err_msg);
+                let _ = std::io::stderr().flush();
+
+                if let Ok(mut snap) = snapshot_lock().lock() {
+                    snap.status = "error".to_string();
+                    snap.error_message = Some(err_msg.clone());
                 }
+                let payload = serde_json::json!({ "message": err_msg });
+                emit_ipc_event(&app, "gateway-error", &payload);
                 error_emitted = true;
                 break;
             }
@@ -340,12 +468,10 @@ impl GatewayManager {
                         );
                         let _ = std::io::stdout().flush();
 
-                        // Cancelar tarea de heartbeat anterior si existiera
                         if let Some(t) = heartbeat_task.take() {
                             t.abort();
                         }
 
-                        // Lanzar Heartbeat con Jitter inicial
                         let hb_tx = tx.clone();
                         let hb_seq = seq.clone();
                         let interval_dur = Duration::from_millis(heartbeat_interval);
@@ -370,7 +496,6 @@ impl GatewayManager {
                             }
                         }));
 
-                        // Enviar Opcode 2 IDENTIFY con Super Properties actualizadas (build 382000)
                         let super_props = SuperProperties::default();
                         let identify_msg = serde_json::json!({
                             "op": 2,
@@ -421,11 +546,16 @@ impl GatewayManager {
 
                     // Opcode 9: Sesión inválida / Token no autorizado
                     9 => {
-                        let err_msg = "Token inválido o expirado";
+                        let err_msg = "Token inválido o expirado".to_string();
                         println!("[GATEWAY ERROR] Opcode 9 (Invalid Session): {}", err_msg);
                         eprintln!("[GATEWAY ERROR] Opcode 9 (Invalid Session): {}", err_msg);
                         let _ = std::io::stderr().flush();
-                        let _ = app.emit("gateway-error", serde_json::json!({ "message": err_msg }));
+                        if let Ok(mut snap) = snapshot_lock().lock() {
+                            snap.status = "error".to_string();
+                            snap.error_message = Some(err_msg.clone());
+                        }
+                        let payload = serde_json::json!({ "message": err_msg });
+                        emit_ipc_event(&app, "gateway-error", &payload);
                         error_emitted = true;
                         break;
                     }
@@ -443,7 +573,6 @@ impl GatewayManager {
                         if event_type == "READY" {
                             ready_received = true;
 
-                            // Requisito estricto: Log en consola "[GATEWAY] Conectado exitosamente"
                             println!("[GATEWAY] Conectado exitosamente");
                             eprintln!("[GATEWAY] Conectado exitosamente");
                             let _ = std::io::stdout().flush();
@@ -468,7 +597,6 @@ impl GatewayManager {
                             let mut guilds_list = Vec::new();
                             if let Some(guilds_raw) = d["guilds"].as_array() {
                                 for g in guilds_raw {
-                                    // En cuentas de usuario los datos del servidor pueden estar directos o en g["properties"]
                                     let props = if g["properties"].is_object() {
                                         &g["properties"]
                                     } else {
@@ -494,7 +622,6 @@ impl GatewayManager {
                                     if let Some(ch_raw) = g["channels"].as_array() {
                                         for ch in ch_raw {
                                             let ch_type_num = ch["type"].as_u64().unwrap_or(0);
-                                            // Descartar categorías de canal (tipo 4)
                                             if ch_type_num == 4 {
                                                 continue;
                                             }
@@ -541,10 +668,20 @@ impl GatewayManager {
                                 guilds: guilds_list,
                             };
 
-                            let _ = app.emit("gateway-ready", &ready_payload);
+                            // Guardar en el snapshot compartido ANTES de emitir el evento
+                            if let Ok(mut snap) = snapshot_lock().lock() {
+                                snap.status = "ready".to_string();
+                                snap.ready_payload = Some(ready_payload.clone());
+                                snap.error_message = None;
+                            }
+
+                            emit_ipc_event(&app, "gateway-ready", &ready_payload);
                         } else if event_type == "MESSAGE_CREATE" {
-                            let d = &val["d"];
-                            let _ = app.emit("gateway-message-create", d);
+                            let d = val["d"].clone();
+                            if let Ok(mut snap) = snapshot_lock().lock() {
+                                snap.recent_messages.push(d.clone());
+                            }
+                            emit_ipc_event(&app, "gateway-message-create", &d);
                         }
                     }
 
@@ -553,15 +690,18 @@ impl GatewayManager {
             }
         }
 
-        // Si el bucle terminó sin haber recibido READY y sin emitir un error previo, notificar al frontend
         if !ready_received && !error_emitted {
-            let _ = app.emit(
-                "gateway-error",
-                serde_json::json!({ "message": "La conexión con el Gateway se cerró antes de recibir READY. Verifica tu token." }),
-            );
+            let err_msg =
+                "La conexión con el Gateway se cerró antes de recibir READY. Verifica tu token."
+                    .to_string();
+            if let Ok(mut snap) = snapshot_lock().lock() {
+                snap.status = "error".to_string();
+                snap.error_message = Some(err_msg.clone());
+            }
+            let payload = serde_json::json!({ "message": err_msg });
+            emit_ipc_event(&app, "gateway-error", &payload);
         }
 
-        // 5. Cierre limpio y liberación de recursos
         if let Some(t) = heartbeat_task {
             t.abort();
         }

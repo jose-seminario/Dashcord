@@ -2,6 +2,7 @@ pub mod core;
 pub mod evasion;
 pub mod storage;
 
+use core::gateway::GatewaySnapshot;
 use core::GatewayManager;
 use evasion::{SuperProperties, VersionResolver};
 use std::io::Write;
@@ -20,6 +21,11 @@ pub struct GatewayHolder {
 #[tauri::command]
 fn get_super_properties() -> Result<SuperProperties, String> {
     Ok(SuperProperties::default())
+}
+
+#[tauri::command]
+fn get_gateway_snapshot() -> Result<GatewaySnapshot, String> {
+    Ok(GatewayManager::get_snapshot())
 }
 
 #[tauri::command]
@@ -162,6 +168,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_super_properties,
+            get_gateway_snapshot,
             save_token,
             connect_saved_token,
             get_token,
