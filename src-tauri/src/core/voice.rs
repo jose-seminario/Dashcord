@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -374,7 +374,7 @@ impl VoiceGatewayManager {
         });
 
         let my_user_id_u64: u64 = user_id.parse().unwrap_or(0);
-        let my_channel_id_u64: u64 = channel_id.parse().unwrap_or(0);
+        let my_channel_id_u64: u64 = channel_id.as_deref().unwrap_or("").parse().unwrap_or(0);
 
         // Enviar Opcode 0 (IDENTIFY) inmediatamente tras abrir el WebSocket de voz
         let identify_payload = serde_json::json!({

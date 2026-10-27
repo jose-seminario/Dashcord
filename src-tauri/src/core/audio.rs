@@ -53,7 +53,7 @@ pub fn dave_session_lock() -> &'static std::sync::Mutex<Option<davey::DaveSessio
 }
 
 pub fn ssrc_map_lock() -> &'static std::sync::Mutex<HashMap<u32, u64>> {
-    SSRC_TO_USER_ID.get_or_init(|| std::sync::Mutex::new(HashMap::new))
+    SSRC_TO_USER_ID.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 /// Buffer de reproducción con protección básica contra Jitter y subdesbordamiento (underrun)
@@ -899,23 +899,19 @@ impl VoiceAudioEngine {
                         rtp_header[8..12].copy_from_slice(&ssrc.to_be_bytes());
 
                         // Cifrar con DAVE E2EE si la sesión MLS está lista
-                        let mut dave_holder = Vec::new();
-                        let final_opus_slice: &[u8] = if let Ok(mut dave_guard) =
-                            dave_session_lock().lock()
-                        {
+                        let encrypted_dave = if let Ok(mut dave_guard) = dave_session_lock().lock() {
                             if let Some(dave) = dave_guard.as_mut().filter(|s| s.is_ready()) {
-                                match dave.encrypt_opus(&opus_out_buf[..encoded_len]) {
-                                    Ok(enc) => {
-                                        dave_holder = enc.into_owned();
-                                        &dave_holder[..]
-                                    }
-                                    Err(_) => &opus_out_buf[..encoded_len],
-                                }
+                                dave.encrypt_opus(&opus_out_buf[..encoded_len]).ok()
                             } else {
-                                &opus_out_buf[..encoded_len]
+                                None
                             }
                         } else {
-                            &opus_out_buf[..encoded_len]
+                            None
+                        };
+
+                        let final_opus_slice: &[u8] = match &encrypted_dave {
+                            Some(cow) => cow.as_ref(),
+                            None => &opus_out_buf[..encoded_len],
                         };
 
                         if let Ok(encrypted_packet) = encrypt_rtp_opus_packet(
@@ -971,8 +967,10 @@ mod tests {
         let mut pcm_out = vec![0.0f32; 1920];
         let packet = OpusPacket::try_from(&opus_out[..encoded_len])
             .expect("Packet Opus inválido");
+        let out_signals = MutSignals::try_from(pcm_out.as_mut_slice())
+            .expect("MutSignals slice inválido");
         let decoded_samples = decoder
-            .decode_float(Some(packet), MutSignals::from(&mut pcm_out[..]), false)
+            .decode_float(Some(packet), out_signals, false)
             .expect("Fallo al decodificar audio Opus");
         assert_eq!(decoded_samples, 960);
     }
