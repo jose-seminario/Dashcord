@@ -1,3 +1,4 @@
+use crate::core::audio::VoiceAudioEngine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -29,10 +30,16 @@ pub struct VoiceConnectionStatus {
     pub ssrc: Option<u32>,
     pub encryption_mode: Option<String>,
     pub has_secret_key: bool,
+    #[serde(default)]
+    pub self_mute: bool,
+    #[serde(default)]
+    pub self_deaf: bool,
+    #[serde(default)]
+    pub speaking: bool,
     pub error: Option<String>,
 }
 
-/// Estado interno completo de la sesión de voz (incluyendo secret_key para Fase B)
+/// Estado interno completo de la sesión de voz (incluyendo secret_key para Fases B y C)
 #[derive(Debug, Clone, Default)]
 pub struct VoiceInternalSession {
     pub status: VoiceConnectionStatus,
@@ -74,13 +81,14 @@ fn emit_voice_status(app: &tauri::AppHandle, status: &VoiceConnectionStatus) {
     let _ = std::io::stdout().flush();
 }
 
-/// Realiza el paquete de IP Discovery UDP de 74 bytes de Discord Voice v4
-/// para obtener nuestra IP pública y puerto UDP asignado por el NAT.
-async fn perform_udp_ip_discovery(
+/// Abre el socket UDP asíncrono hacia el servidor de voz de Discord y ejecuta
+/// el paquete de IP Discovery de 74 bytes (Voice v4), devolviendo el mismo `Arc<UdpSocket>`
+/// para reutilizarlo en la recepción y envío de paquetes RTP (Fases B y C).
+async fn open_udp_and_discover_ip(
     server_ip: &str,
     server_port: u16,
     ssrc: u32,
-) -> Result<(String, u16), String> {
+) -> Result<(Arc<UdpSocket>, String, u16), String> {
     let target_addr = format!("{}:{}", server_ip, server_port);
 
     let socket = UdpSocket::bind("0.0.0.0:0")
@@ -92,6 +100,8 @@ async fn perform_udp_ip_discovery(
         .await
         .map_err(|e| format!("No se pudo conectar socket UDP a {}: {}", target_addr, e))?;
 
+    let shared_socket = Arc::new(socket);
+
     // Construir paquete de 74 bytes:
     // [0..2] = 0x0001 (Request)
     // [2..4] = 0x0046 (70 bytes de payload)
@@ -102,36 +112,31 @@ async fn perform_udp_ip_discovery(
     packet[2..4].copy_from_slice(&70u16.to_be_bytes());
     packet[4..8].copy_from_slice(&ssrc.to_be_bytes());
 
-    socket
-        .send(&packet)
-        .await
-        .map_err(|e| format!("Error enviando paquete UDP IP Discovery: {}", e))?;
-
-    let mut recv_buf = [0u8; 74];
-    let len = timeout(UDP_DISCOVERY_TIMEOUT, socket.recv(&mut recv_buf))
-        .await
-        .map_err(|_| "Timeout esperando respuesta UDP IP Discovery (3s)".to_string())?
-        .map_err(|e| format!("Error recibiendo UDP IP Discovery: {}", e))?;
-
-    if len < 74 {
-        return Err(format!(
-            "Respuesta UDP IP Discovery incompleta ({} bytes, esperados 74)",
-            len
-        ));
+    if let Err(e) = shared_socket.send(&packet).await {
+        println!("[VOICE] Aviso enviando paquete UDP IP Discovery: {}", e);
+        return Ok((shared_socket, server_ip.to_string(), server_port));
     }
 
-    // Bytes 8..72 contienen la IP en ASCII terminada en null byte (0x00)
-    let ip_bytes = &recv_buf[8..72];
-    let null_pos = ip_bytes
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(ip_bytes.len());
-    let external_ip = String::from_utf8_lossy(&ip_bytes[..null_pos]).to_string();
-
-    // Bytes 72..74 contienen el puerto externo en Big-Endian
-    let external_port = u16::from_be_bytes([recv_buf[72], recv_buf[73]]);
-
-    Ok((external_ip, external_port))
+    let mut recv_buf = [0u8; 74];
+    match timeout(UDP_DISCOVERY_TIMEOUT, shared_socket.recv(&mut recv_buf)).await {
+        Ok(Ok(len)) if len >= 74 => {
+            let ip_bytes = &recv_buf[8..72];
+            let null_pos = ip_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(ip_bytes.len());
+            let external_ip = String::from_utf8_lossy(&ip_bytes[..null_pos]).to_string();
+            let external_port = u16::from_be_bytes([recv_buf[72], recv_buf[73]]);
+            Ok((shared_socket, external_ip, external_port))
+        }
+        _ => {
+            println!(
+                "[VOICE] Aviso en UDP IP Discovery (usando {}:{} de respaldo)",
+                server_ip, server_port
+            );
+            Ok((shared_socket, server_ip.to_string(), server_port))
+        }
+    }
 }
 
 /// Selecciona el modo de cifrado más ligero soportado por el nodo de voz,
@@ -171,7 +176,28 @@ impl VoiceGatewayManager {
             .unwrap_or_default()
     }
 
+    pub fn set_mute_deaf(app: &tauri::AppHandle, muted: bool, deafened: bool) {
+        let effective_mute = muted || deafened;
+        VoiceAudioEngine::set_mute_deaf(effective_mute, deafened);
+
+        let mut updated_opt = None;
+        if let Ok(mut sess) = voice_session_lock().lock() {
+            sess.status.self_mute = effective_mute;
+            sess.status.self_deaf = deafened;
+            if effective_mute {
+                sess.status.speaking = false;
+            }
+            updated_opt = Some(sess.status.clone());
+        }
+
+        if let Some(st) = updated_opt {
+            emit_voice_status(app, &st);
+        }
+    }
+
     pub fn disconnect(app: &tauri::AppHandle) {
+        VoiceAudioEngine::stop();
+
         if let Ok(mut abort_guard) = voice_abort_lock().lock() {
             if let Some(handle) = abort_guard.take() {
                 println!("[VOICE] Cerrando sesión activa del Voice Gateway...");
@@ -181,6 +207,9 @@ impl VoiceGatewayManager {
 
         let disconnected_status = VoiceConnectionStatus {
             state: "disconnected".to_string(),
+            self_mute: VoiceAudioEngine::is_muted(),
+            self_deaf: VoiceAudioEngine::is_deafened(),
+            speaking: false,
             ..Default::default()
         };
 
@@ -202,7 +231,8 @@ impl VoiceGatewayManager {
         voice_token: String,
         endpoint: String,
     ) {
-        // Si había una sesión de voz previa activa, abortarla primero
+        VoiceAudioEngine::stop();
+
         if let Ok(mut abort_guard) = voice_abort_lock().lock() {
             if let Some(prev_handle) = abort_guard.take() {
                 prev_handle.abort();
@@ -219,6 +249,9 @@ impl VoiceGatewayManager {
             ssrc: None,
             encryption_mode: None,
             has_secret_key: false,
+            self_mute: VoiceAudioEngine::is_muted(),
+            self_deaf: VoiceAudioEngine::is_deafened(),
+            speaking: false,
             error: None,
         };
 
@@ -243,6 +276,7 @@ impl VoiceGatewayManager {
             {
                 eprintln!("[VOICE ERROR] {}", err);
                 let _ = std::io::stderr().flush();
+                VoiceAudioEngine::stop();
 
                 let err_status = VoiceConnectionStatus {
                     state: "error".to_string(),
@@ -254,6 +288,9 @@ impl VoiceGatewayManager {
                     ssrc: None,
                     encryption_mode: None,
                     has_secret_key: false,
+                    self_mute: VoiceAudioEngine::is_muted(),
+                    self_deaf: VoiceAudioEngine::is_deafened(),
+                    speaking: false,
                     error: Some(err),
                 };
 
@@ -278,7 +315,6 @@ impl VoiceGatewayManager {
         voice_token: String,
         endpoint: String,
     ) -> Result<(), String> {
-        // Limpiar sufijos :80 o :443 del endpoint para usar wss:// en el puerto TLS estándar (443)
         let clean_host = endpoint
             .trim()
             .trim_end_matches(":80")
@@ -326,7 +362,7 @@ impl VoiceGatewayManager {
         };
 
         let (mut write_half, mut read_half) = ws_stream.split();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WsMessage>(64);
 
         let writer_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -352,6 +388,7 @@ impl VoiceGatewayManager {
 
         let mut heartbeat_task: Option<tokio::task::JoinHandle<()>> = None;
         let current_ip_port: Arc<Mutex<Option<(String, u16, u32)>>> = Arc::new(Mutex::new(None));
+        let mut active_udp_socket: Option<Arc<UdpSocket>> = None;
 
         while let Some(msg_result) = read_half.next().await {
             let msg = match msg_result {
@@ -434,7 +471,6 @@ impl VoiceGatewayManager {
                         let port = d["port"].as_u64().unwrap_or(0) as u16;
                         let selected_mode = select_encryption_mode(d["modes"].as_array());
 
-                        // Log obligatorio requerido por la Fase A
                         println!(
                             "[VOICE] Conexión al Voice Gateway establecida. IP: {}, Puerto: {}",
                             ip, port
@@ -443,7 +479,6 @@ impl VoiceGatewayManager {
 
                         *current_ip_port.lock().await = Some((ip.clone(), port, ssrc));
 
-                        // Actualizar estado para la UI inmediatamente tras recibir READY
                         let ready_status = VoiceConnectionStatus {
                             state: "connected".to_string(),
                             guild_id: Some(guild_id.clone()),
@@ -454,6 +489,9 @@ impl VoiceGatewayManager {
                             ssrc: Some(ssrc),
                             encryption_mode: Some(selected_mode.clone()),
                             has_secret_key: false,
+                            self_mute: VoiceAudioEngine::is_muted(),
+                            self_deaf: VoiceAudioEngine::is_deafened(),
+                            speaking: false,
                             error: None,
                         };
                         if let Ok(mut sess) = voice_session_lock().lock() {
@@ -461,29 +499,17 @@ impl VoiceGatewayManager {
                         }
                         emit_voice_status(&app, &ready_status);
 
-                        // Realizar IP Discovery UDP para obtener IP/Puerto externos antes de SELECT_PROTOCOL
-                        let (client_ip, client_port) = match perform_udp_ip_discovery(
-                            &ip, port, ssrc,
-                        )
-                        .await
-                        {
-                            Ok((ext_ip, ext_port)) => {
-                                println!(
-                                    "[VOICE] UDP IP Discovery exitoso -> {}:{} (SSRC: {})",
-                                    ext_ip, ext_port, ssrc
-                                );
-                                let _ = std::io::stdout().flush();
-                                (ext_ip, ext_port)
-                            }
-                            Err(disc_err) => {
-                                println!(
-                                        "[VOICE] Aviso en UDP IP Discovery ({}), usando dirección de respaldo para SELECT_PROTOCOL",
-                                        disc_err
-                                    );
-                                let _ = std::io::stdout().flush();
-                                (ip.clone(), port)
-                            }
-                        };
+                        // Abrir socket UDP persistente y ejecutar IP Discovery de 74 bytes
+                        let (udp_sock, client_ip, client_port) =
+                            open_udp_and_discover_ip(&ip, port, ssrc).await?;
+
+                        println!(
+                            "[VOICE] Socket UDP listo -> {}:{} (SSRC: {})",
+                            client_ip, client_port, ssrc
+                        );
+                        let _ = std::io::stdout().flush();
+
+                        active_udp_socket = Some(udp_sock);
 
                         // Enviar Opcode 1: SELECT_PROTOCOL (preferiblemente xsalsa20_poly1305_lite)
                         let select_protocol_payload = serde_json::json!({
@@ -547,16 +573,44 @@ impl VoiceGatewayManager {
                             ip: ip_opt,
                             port: port_opt,
                             ssrc: ssrc_opt,
-                            encryption_mode: Some(mode),
+                            encryption_mode: Some(mode.clone()),
                             has_secret_key: !secret_key.is_empty(),
+                            self_mute: VoiceAudioEngine::is_muted(),
+                            self_deaf: VoiceAudioEngine::is_deafened(),
+                            speaking: false,
                             error: None,
                         };
 
                         if let Ok(mut sess) = voice_session_lock().lock() {
                             sess.status = full_status.clone();
-                            sess.secret_key = secret_key;
+                            sess.secret_key = secret_key.clone();
                         }
                         emit_voice_status(&app, &full_status);
+
+                        // Iniciar el motor de audio bidireccional (Fases B y C: Recepción + Envío con nnnoiseless, Opus y XSalsa20Poly1305)
+                        if let (Some(ref udp_sock), Some(ssrc_val)) = (&active_udp_socket, ssrc_opt)
+                        {
+                            let app_for_speaking = app.clone();
+                            VoiceAudioEngine::start(
+                                udp_sock.clone(),
+                                secret_key,
+                                mode,
+                                ssrc_val,
+                                tx.clone(),
+                                move |is_speaking| {
+                                    let mut updated_status = None;
+                                    if let Ok(mut sess) = voice_session_lock().lock() {
+                                        if sess.status.speaking != is_speaking {
+                                            sess.status.speaking = is_speaking;
+                                            updated_status = Some(sess.status.clone());
+                                        }
+                                    }
+                                    if let Some(st) = updated_status {
+                                        emit_voice_status(&app_for_speaking, &st);
+                                    }
+                                },
+                            );
+                        }
                     }
 
                     // Opcode 6: HEARTBEAT_ACK
@@ -569,6 +623,7 @@ impl VoiceGatewayManager {
             }
         }
 
+        VoiceAudioEngine::stop();
         if let Some(t) = heartbeat_task {
             t.abort();
         }

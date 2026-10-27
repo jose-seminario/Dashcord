@@ -163,6 +163,8 @@ interface AppState {
   setSelectedChannel: (id: string) => void;
   joinVoiceChannel: (guildId: string, channelId: string) => Promise<void>;
   leaveVoiceChannel: (guildId: string) => Promise<void>;
+  toggleVoiceMute: () => Promise<void>;
+  toggleVoiceDeafen: () => Promise<void>;
   toggleMembersSidebar: () => void;
   setSettingsOpen: (open: boolean) => void;
   setCommandPaletteOpen: (open: boolean) => void;
@@ -287,16 +289,75 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   leaveVoiceChannel: async (guildId) => {
-    set({
+    set((s) => ({
       voiceConnection: {
         state: 'disconnected',
+        self_mute: s.voiceConnection.self_mute,
+        self_deaf: s.voiceConnection.self_deaf,
+        speaking: false,
       },
-    });
+    }));
     if (!guildId) return;
     try {
       await invoke('leave_voice_channel', { guildId });
     } catch (err) {
       console.error('[VOICE] Error desconectando del canal de voz:', err);
+    }
+  },
+
+  toggleVoiceMute: async () => {
+    const state = get();
+    const nextMuted = !state.voiceConnection.self_mute;
+    const nextDeafened = nextMuted ? !!state.voiceConnection.self_deaf : false;
+
+    set((s) => ({
+      voiceConnection: {
+        ...s.voiceConnection,
+        self_mute: nextMuted,
+        self_deaf: nextDeafened,
+        speaking: nextMuted ? false : s.voiceConnection.speaking,
+      },
+    }));
+
+    try {
+      const updated = await invoke<VoiceConnectionStatus>('set_voice_mute_deaf', {
+        guildId: state.voiceConnection.guild_id || state.selectedGuildId,
+        muted: nextMuted,
+        deafened: nextDeafened,
+      });
+      if (updated) {
+        set({ voiceConnection: updated });
+      }
+    } catch (err) {
+      console.error('[VOICE] Error alternando Mute:', err);
+    }
+  },
+
+  toggleVoiceDeafen: async () => {
+    const state = get();
+    const nextDeafened = !state.voiceConnection.self_deaf;
+    const nextMuted = nextDeafened ? true : false;
+
+    set((s) => ({
+      voiceConnection: {
+        ...s.voiceConnection,
+        self_mute: nextMuted,
+        self_deaf: nextDeafened,
+        speaking: nextDeafened ? false : s.voiceConnection.speaking,
+      },
+    }));
+
+    try {
+      const updated = await invoke<VoiceConnectionStatus>('set_voice_mute_deaf', {
+        guildId: state.voiceConnection.guild_id || state.selectedGuildId,
+        muted: nextMuted,
+        deafened: nextDeafened,
+      });
+      if (updated) {
+        set({ voiceConnection: updated });
+      }
+    } catch (err) {
+      console.error('[VOICE] Error alternando Deafen:', err);
     }
   },
 

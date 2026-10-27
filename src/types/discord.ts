@@ -96,5 +96,8 @@ export interface VoiceConnectionStatus {
   ssrc?: number | null;
   encryption_mode?: string | null;
   has_secret_key?: boolean;
+  self_mute?: boolean;
+  self_deaf?: boolean;
+  speaking?: boolean;
   error?: string | null;
 }

@@ -77,6 +77,16 @@ fn get_voice_status() -> Result<core::VoiceConnectionStatus, String> {
 }
 
 #[tauri::command]
+async fn set_voice_mute_deaf(
+    app: tauri::AppHandle,
+    guild_id: Option<String>,
+    muted: bool,
+    deafened: bool,
+) -> Result<core::VoiceConnectionStatus, String> {
+    GatewayManager::set_voice_mute_deaf(&app, guild_id, muted, deafened).await
+}
+
+#[tauri::command]
 async fn save_token(
     app: tauri::AppHandle,
     config: State<'_, AppConfig>,
@@ -219,6 +229,7 @@ pub fn run() {
             join_voice_channel,
             leave_voice_channel,
             get_voice_status,
+            set_voice_mute_deaf,
             save_token,
             connect_saved_token,
             get_token,

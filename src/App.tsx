@@ -229,7 +229,13 @@ export const App: React.FC = () => {
 
         const state = useAppStore.getState();
 
-        if (snap.voice_status && snap.voice_status.state !== state.voiceConnection.state) {
+        if (
+          snap.voice_status &&
+          (snap.voice_status.state !== state.voiceConnection.state ||
+            snap.voice_status.speaking !== state.voiceConnection.speaking ||
+            snap.voice_status.self_mute !== state.voiceConnection.self_mute ||
+            snap.voice_status.self_deaf !== state.voiceConnection.self_deaf)
+        ) {
           state.handleVoiceConnectionStatus(snap.voice_status);
         }
 

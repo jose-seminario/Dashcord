@@ -202,13 +202,16 @@ impl GatewayManager {
             return Err("El Gateway principal no está conectado.".to_string());
         };
 
+        let is_muted = crate::core::audio::VoiceAudioEngine::is_muted();
+        let is_deaf = crate::core::audio::VoiceAudioEngine::is_deafened();
+
         let op4 = serde_json::json!({
             "op": 4,
             "d": {
                 "guild_id": guild_id,
                 "channel_id": channel_id,
-                "self_mute": false,
-                "self_deaf": false,
+                "self_mute": is_muted,
+                "self_deaf": is_deaf,
                 "self_video": false
             }
         });
@@ -249,6 +252,44 @@ impl GatewayManager {
             let _ = tx.send(WsMessage::Text(op4.to_string().into())).await;
         }
         Ok(())
+    }
+
+    /// Actualiza el estado de Mute / Deafen en el motor de audio y sincroniza Opcode 4 con el Gateway
+    pub async fn set_voice_mute_deaf(
+        app: &tauri::AppHandle,
+        guild_id: Option<String>,
+        muted: bool,
+        deafened: bool,
+    ) -> Result<VoiceConnectionStatus, String> {
+        let effective_mute = muted || deafened;
+        VoiceGatewayManager::set_mute_deaf(app, effective_mute, deafened);
+
+        let status = VoiceGatewayManager::get_status();
+        let active_ch = active_voice_channel_lock()
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .or_else(|| status.channel_id.clone());
+        let target_guild = guild_id.or_else(|| status.guild_id.clone());
+
+        if let (Some(gid), Some(cid)) = (target_guild, active_ch) {
+            let tx_opt = main_ws_tx_lock().lock().ok().and_then(|g| g.clone());
+            if let Some(tx) = tx_opt {
+                let op4 = serde_json::json!({
+                    "op": 4,
+                    "d": {
+                        "guild_id": gid,
+                        "channel_id": cid,
+                        "self_mute": effective_mute,
+                        "self_deaf": deafened,
+                        "self_video": false
+                    }
+                });
+                let _ = tx.send(WsMessage::Text(op4.to_string().into())).await;
+            }
+        }
+
+        Ok(VoiceGatewayManager::get_status())
     }
 
     /// Mantiene compatibilidad con las pruebas unitarias del backend

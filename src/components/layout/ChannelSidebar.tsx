@@ -2,6 +2,7 @@ import React from 'react';
 import {
   Hash,
   Volume2,
+  VolumeX,
   Megaphone,
   Mic,
   MicOff,
@@ -21,6 +22,8 @@ export const ChannelSidebar: React.FC = () => {
     setSelectedChannel,
     joinVoiceChannel,
     leaveVoiceChannel,
+    toggleVoiceMute,
+    toggleVoiceDeafen,
     currentUser,
     voiceStates,
     voiceConnection,
@@ -30,6 +33,9 @@ export const ChannelSidebar: React.FC = () => {
   const currentGuild = guilds.find((g) => g.id === selectedGuildId);
   const channels = currentGuild?.channels || [];
   const activeVoiceChannel = channels.find((c) => c.id === voiceConnection.channel_id);
+  const isMuted = !!voiceConnection.self_mute;
+  const isDeafened = !!voiceConnection.self_deaf;
+  const isSpeaking = !!voiceConnection.speaking && !isMuted && !isDeafened;
 
   const getChannelIcon = (type: string) => {
     switch (type) {
@@ -118,32 +124,61 @@ export const ChannelSidebar: React.FC = () => {
                 {/* Usuarios conectados al canal de voz */}
                 {voiceUsers.length > 0 && (
                   <div className="pl-6 pr-2 py-1 space-y-1">
-                    {voiceUsers.map((vu) => (
-                      <div
-                        key={vu.user_id}
-                        className="flex items-center gap-2 px-2 py-1 rounded-md bg-base/40 border border-border-subtle/50 text-xs text-secondary_text"
-                      >
-                        <div className="relative flex-shrink-0">
-                          <img
-                            src={resolveAvatarUrl(vu.user_id, vu.avatar)}
-                            alt={vu.username}
-                            className="w-5 h-5 rounded-full object-cover ring-1 ring-emerald-400/70"
-                            onError={(e) => {
-                              e.currentTarget.src =
-                                'https://cdn.discordapp.com/embed/avatars/0.png';
-                            }}
-                          />
+                    {voiceUsers.map((vu) => {
+                      const isSelf = vu.user_id === currentUser.id;
+                      const vuMuted = isSelf ? isMuted : !!vu.self_mute;
+                      const vuDeaf = isSelf ? isDeafened : !!vu.self_deaf;
+                      const vuSpeaking = isSelf ? isSpeaking : !vuMuted;
+
+                      return (
+                        <div
+                          key={vu.user_id}
+                          className={`flex items-center gap-2 px-2 py-1 rounded-md bg-base/40 border text-xs transition-all ${
+                            isSelf && isSpeaking
+                              ? 'border-emerald-400/70 shadow-[0_0_10px_rgba(52,211,153,0.25)] text-primary'
+                              : 'border-border-subtle/50 text-secondary_text'
+                          }`}
+                        >
+                          <div className="relative flex-shrink-0">
+                            <img
+                              src={resolveAvatarUrl(vu.user_id, vu.avatar)}
+                              alt={vu.username}
+                              className={`w-5 h-5 rounded-full object-cover transition-all ${
+                                vuSpeaking
+                                  ? 'ring-2 ring-emerald-400 shadow-[0_0_8px_#34d399]'
+                                  : 'ring-1 ring-border-subtle'
+                              }`}
+                              onError={(e) => {
+                                e.currentTarget.src =
+                                  'https://cdn.discordapp.com/embed/avatars/0.png';
+                              }}
+                            />
+                            {isSelf && isSpeaking && (
+                              <span
+                                title="Micrófono captando voz (RNNoise activo)"
+                                className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]"
+                              />
+                            )}
+                          </div>
+                          <span className="truncate flex-1 text-[11px] font-medium text-primary">
+                            {vu.username}
+                          </span>
+                          {vuDeaf ? (
+                            <VolumeX className="w-3 h-3 text-rose-400 flex-shrink-0" />
+                          ) : vuMuted ? (
+                            <MicOff className="w-3 h-3 text-rose-400 flex-shrink-0" />
+                          ) : (
+                            <Volume2
+                              className={`w-3 h-3 flex-shrink-0 ${
+                                vuSpeaking
+                                  ? 'text-emerald-400 animate-pulse drop-shadow-[0_0_6px_rgba(52,211,153,0.9)]'
+                                  : 'text-muted'
+                              }`}
+                            />
+                          )}
                         </div>
-                        <span className="truncate flex-1 text-[11px] font-medium text-primary">
-                          {vu.username}
-                        </span>
-                        {vu.self_mute ? (
-                          <MicOff className="w-3 h-3 text-rose-400 flex-shrink-0" />
-                        ) : (
-                          <Volume2 className="w-3 h-3 text-emerald-400 flex-shrink-0 animate-pulse" />
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -157,10 +192,27 @@ export const ChannelSidebar: React.FC = () => {
         <div className="bg-base/95 border-t border-accent-cyan/30 px-3 py-2 flex items-center justify-between gap-2">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
+              {/* Círculo verde brillante cuando el micrófono capta voz */}
+              <span
+                title={
+                  isSpeaking
+                    ? 'Transmitiendo voz (Supresión de ruido RNNoise activa)'
+                    : 'Canal de voz activo'
+                }
+                className={`w-2.5 h-2.5 rounded-full flex-shrink-0 transition-all duration-150 ${
+                  isSpeaking
+                    ? 'bg-emerald-400 shadow-[0_0_10px_#34d399,0_0_20px_#10b981] scale-110'
+                    : voiceConnection.state === 'connected'
+                    ? 'bg-emerald-500/50'
+                    : voiceConnection.state === 'error'
+                    ? 'bg-rose-500'
+                    : 'bg-amber-400 animate-ping'
+                }`}
+              />
               <Radio
                 className={`w-3.5 h-3.5 flex-shrink-0 ${
                   voiceConnection.state === 'connected'
-                    ? 'text-emerald-400 animate-pulse'
+                    ? 'text-emerald-400'
                     : voiceConnection.state === 'error'
                     ? 'text-rose-400'
                     : 'text-amber-400 animate-spin'
@@ -176,7 +228,9 @@ export const ChannelSidebar: React.FC = () => {
                 }`}
               >
                 {voiceConnection.state === 'connected'
-                  ? 'Voz Conectada (UDP)'
+                  ? isSpeaking
+                    ? 'Hablando • UDP'
+                    : 'Voz Conectada (UDP)'
                   : voiceConnection.state === 'error'
                   ? 'Error de Voz'
                   : 'Handshake de Voz...'}
@@ -189,15 +243,47 @@ export const ChannelSidebar: React.FC = () => {
             </div>
           </div>
 
-          <button
-            onClick={() =>
-              leaveVoiceChannel(voiceConnection.guild_id || selectedGuildId)
-            }
-            title="Desconectar del canal de voz"
-            className="p-1.5 rounded-md bg-rose-500/15 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 transition-colors flex-shrink-0"
-          >
-            <PhoneOff className="w-3.5 h-3.5" />
-          </button>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <button
+              onClick={toggleVoiceMute}
+              title={isMuted ? 'Activar micrófono' : 'Silenciar micrófono'}
+              className={`p-1.5 rounded-md border transition-colors ${
+                isMuted
+                  ? 'bg-rose-500/20 text-rose-400 border-rose-500/40 hover:bg-rose-500/30'
+                  : 'bg-surface hover:bg-hover text-secondary_text hover:text-primary border-border-subtle'
+              }`}
+            >
+              {isMuted ? (
+                <MicOff className="w-3.5 h-3.5" />
+              ) : (
+                <Mic className="w-3.5 h-3.5" />
+              )}
+            </button>
+            <button
+              onClick={toggleVoiceDeafen}
+              title={isDeafened ? 'Activar audio' : 'Ensordecer audio'}
+              className={`p-1.5 rounded-md border transition-colors ${
+                isDeafened
+                  ? 'bg-rose-500/20 text-rose-400 border-rose-500/40 hover:bg-rose-500/30'
+                  : 'bg-surface hover:bg-hover text-secondary_text hover:text-primary border-border-subtle'
+              }`}
+            >
+              {isDeafened ? (
+                <VolumeX className="w-3.5 h-3.5" />
+              ) : (
+                <Headphones className="w-3.5 h-3.5" />
+              )}
+            </button>
+            <button
+              onClick={() =>
+                leaveVoiceChannel(voiceConnection.guild_id || selectedGuildId)
+              }
+              title="Desconectar del canal de voz"
+              className="p-1.5 rounded-md bg-rose-500/15 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 transition-colors"
+            >
+              <PhoneOff className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -208,15 +294,21 @@ export const ChannelSidebar: React.FC = () => {
             <img
               src={userAvatarSrc}
               alt={currentUser.username}
-              className="w-8 h-8 rounded-full object-cover border border-border-subtle bg-surface"
+              className={`w-8 h-8 rounded-full object-cover bg-surface transition-all duration-150 ${
+                isSpeaking
+                  ? 'ring-2 ring-emerald-400 shadow-[0_0_12px_#34d399]'
+                  : 'border border-border-subtle'
+              }`}
               onError={(e) => {
                 e.currentTarget.src = 'https://cdn.discordapp.com/embed/avatars/0.png';
               }}
             />
             <span
-              className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ring-2 ring-base ${getStatusColor(
-                currentUser.status
-              )}`}
+              className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ring-2 ring-base ${
+                isSpeaking
+                  ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]'
+                  : getStatusColor(currentUser.status)
+              }`}
             />
           </div>
           <div className="flex flex-col min-w-0">
@@ -224,7 +316,9 @@ export const ChannelSidebar: React.FC = () => {
               {currentUser.global_name || currentUser.username}
             </span>
             <span className="text-[10px] text-muted truncate">
-              {currentUser.custom_status || `@${currentUser.username}`}
+              {isSpeaking
+                ? '🟢 Transmitiendo voz...'
+                : currentUser.custom_status || `@${currentUser.username}`}
             </span>
           </div>
         </div>
@@ -232,16 +326,34 @@ export const ChannelSidebar: React.FC = () => {
         {/* User Quick Action Toggles */}
         <div className="flex items-center gap-0.5">
           <button
-            title="Silenciar micrófono"
-            className="p-1.5 text-secondary_text hover:text-primary hover:bg-hover rounded transition-colors"
+            onClick={toggleVoiceMute}
+            title={isMuted ? 'Activar micrófono' : 'Silenciar micrófono'}
+            className={`p-1.5 rounded transition-colors ${
+              isMuted
+                ? 'text-rose-400 bg-rose-500/15 hover:bg-rose-500/25'
+                : 'text-secondary_text hover:text-primary hover:bg-hover'
+            }`}
           >
-            <Mic className="w-3.5 h-3.5" />
+            {isMuted ? (
+              <MicOff className="w-3.5 h-3.5" />
+            ) : (
+              <Mic className="w-3.5 h-3.5" />
+            )}
           </button>
           <button
-            title="Ensordecer audio"
-            className="p-1.5 text-secondary_text hover:text-primary hover:bg-hover rounded transition-colors"
+            onClick={toggleVoiceDeafen}
+            title={isDeafened ? 'Activar audio' : 'Ensordecer audio'}
+            className={`p-1.5 rounded transition-colors ${
+              isDeafened
+                ? 'text-rose-400 bg-rose-500/15 hover:bg-rose-500/25'
+                : 'text-secondary_text hover:text-primary hover:bg-hover'
+            }`}
           >
-            <Headphones className="w-3.5 h-3.5" />
+            {isDeafened ? (
+              <VolumeX className="w-3.5 h-3.5" />
+            ) : (
+              <Headphones className="w-3.5 h-3.5" />
+            )}
           </button>
           <button
             onClick={() => setSettingsOpen(true)}
