@@ -668,7 +668,7 @@ impl VoiceGatewayManager {
             }
 
             if let WsMessage::Binary(bin_data) = msg {
-                let data = bin_data.as_ref();
+                let data: &[u8] = bin_data.as_ref();
                 if data.is_empty() {
                     continue;
                 }

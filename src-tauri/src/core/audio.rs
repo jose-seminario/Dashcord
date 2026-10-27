@@ -943,7 +943,7 @@ mod tests {
 
     #[test]
     fn test_opus_encoder_decoder_roundtrip() {
-        let mut encoder = OpusEncoder::new(
+        let encoder = OpusEncoder::new(
             OpusSampleRate::Hz48000,
             OpusChannels::Stereo,
             OpusApp::Voip,
