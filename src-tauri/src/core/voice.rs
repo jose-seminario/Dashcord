@@ -1,10 +1,10 @@
-use crate::core::audio::VoiceAudioEngine;
+use crate::core::audio::{self, VoiceAudioEngine};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -373,6 +373,9 @@ impl VoiceGatewayManager {
             }
         });
 
+        let my_user_id_u64: u64 = user_id.parse().unwrap_or(0);
+        let my_channel_id_u64: u64 = channel_id.parse().unwrap_or(0);
+
         // Enviar Opcode 0 (IDENTIFY) inmediatamente tras abrir el WebSocket de voz
         let identify_payload = serde_json::json!({
             "op": 0,
@@ -380,7 +383,8 @@ impl VoiceGatewayManager {
                 "server_id": guild_id,
                 "user_id": user_id,
                 "session_id": session_id,
-                "token": voice_token
+                "token": voice_token,
+                "max_dave_protocol_version": 1
             }
         });
         let _ = tx
@@ -408,10 +412,16 @@ impl VoiceGatewayManager {
             if let WsMessage::Close(frame) = msg {
                 if let Some(cf) = frame {
                     let code: u16 = cf.code.into();
-                    println!(
-                        "[VOICE] Voice Gateway cerró conexión (código {}: {})",
-                        code, cf.reason
-                    );
+                    if code == 4017 {
+                        eprintln!(
+                            "[VOICE] DAVE handshake falló (código 4017: Discord requiere protocolo DAVE E2EE)"
+                        );
+                    } else {
+                        println!(
+                            "[VOICE] Voice Gateway cerró conexión (código {}: {})",
+                            code, cf.reason
+                        );
+                    }
                 }
                 break;
             }
@@ -614,12 +624,263 @@ impl VoiceGatewayManager {
                         }
                     }
 
+                    // Opcode 5: SPEAKING (Mapeo SSRC -> User ID para descifrado DAVE)
+                    5 => {
+                        let d = &val["d"];
+                        if let (Some(ssrc_val), Some(uid_str)) =
+                            (d["ssrc"].as_u64(), d["user_id"].as_str())
+                        {
+                            if let Ok(uid_num) = uid_str.parse::<u64>() {
+                                audio::ssrc_map_lock()
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(ssrc_val as u32, uid_num);
+                            }
+                        }
+                    }
+
                     // Opcode 6: HEARTBEAT_ACK
                     6 => {
                         tracing::debug!("[VOICE] Heartbeat ACK recibido");
                     }
 
+                    // Opcode 21: DAVE Prepare Transition
+                    21 => {
+                        let transition_id = val["d"]["transition_id"].as_u64().unwrap_or(0) as u16;
+                        println!("[VOICE DAVE] Preparando transición DAVE: id {}", transition_id);
+                        let ready_payload = serde_json::json!({
+                            "op": 23,
+                            "d": {
+                                "transition_id": transition_id
+                            }
+                        });
+                        let _ = tx.send(WsMessage::Text(ready_payload.to_string().into())).await;
+                    }
+
+                    // Opcode 22: DAVE Execute Transition
+                    22 => {
+                        let transition_id = val["d"]["transition_id"].as_u64().unwrap_or(0) as u16;
+                        println!("[VOICE DAVE] Ejecutando transición DAVE: id {}", transition_id);
+                    }
+
                     _ => {}
+                }
+            }
+
+            if let WsMessage::Binary(bin_data) = msg {
+                let data = bin_data.as_ref();
+                if data.is_empty() {
+                    continue;
+                }
+
+                // Las tramas del servidor suelen tener 2 bytes de sequence_number + 1 byte de opcode
+                let (op, payload) = if data.len() >= 3 && data[2] >= 25 && data[2] <= 31 {
+                    (data[2], &data[3..])
+                } else if data[0] >= 25 && data[0] <= 31 {
+                    (data[0], &data[1..])
+                } else {
+                    (0, &data[..])
+                };
+
+                match op {
+                    // Opcode 25: DAVE MLS External Sender Package
+                    25 => {
+                        println!(
+                            "[VOICE DAVE] Recibido Opcode 25 (External Sender Package, {} bytes)",
+                            payload.len()
+                        );
+                        let tx_dave = tx.clone();
+                        let payload_vec = payload.to_vec();
+                        let uid = my_user_id_u64;
+                        let cid = my_channel_id_u64;
+
+                        tokio::spawn(async move {
+                            let mut guard = audio::dave_session_lock()
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            if guard.is_none() {
+                                if let Ok(sess) = davey::DaveSession::new(
+                                    std::num::NonZeroU16::new(1).unwrap(),
+                                    uid,
+                                    cid,
+                                    None,
+                                ) {
+                                    *guard = Some(sess);
+                                }
+                            }
+
+                            if let Some(session) = guard.as_mut() {
+                                if let Err(e) = session.set_external_sender(&payload_vec) {
+                                    eprintln!(
+                                        "[VOICE DAVE] Error configurando external sender: {:?}",
+                                        e
+                                    );
+                                } else {
+                                    println!(
+                                        "[VOICE DAVE] External sender configurado. Generando Key Package..."
+                                    );
+                                    match session.create_key_package() {
+                                        Ok(key_pkg) => {
+                                            println!(
+                                                "[VOICE DAVE] Enviando Opcode 26 (Key Package, {} bytes)...",
+                                                key_pkg.len()
+                                            );
+                                            let mut out = Vec::with_capacity(1 + key_pkg.len());
+                                            out.push(26u8); // Opcode 26: DAVE MLS Key Package
+                                            out.extend_from_slice(&key_pkg);
+                                            let _ = tx_dave.send(WsMessage::Binary(out.into())).await;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[VOICE DAVE] Error creando Key Package: {:?}", e)
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+
+                    // Opcode 27: DAVE MLS Proposals
+                    27 => {
+                        println!(
+                            "[VOICE DAVE] Recibido Opcode 27 (Proposals, {} bytes)",
+                            payload.len()
+                        );
+                        if !payload.is_empty() {
+                            let tx_dave = tx.clone();
+                            let op_type_byte = payload[0];
+                            let proposals_data = payload[1..].to_vec();
+                            let op_type = if op_type_byte == 0 {
+                                davey::ProposalsOperationType::APPEND
+                            } else {
+                                davey::ProposalsOperationType::REVOKE
+                            };
+
+                            tokio::spawn(async move {
+                                let mut guard = audio::dave_session_lock()
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                if let Some(session) = guard.as_mut() {
+                                    match session.process_proposals(op_type, &proposals_data, None) {
+                                        Ok(Some(commit_welcome)) => {
+                                            println!(
+                                                "[VOICE DAVE] Commit generado tras proposals. Enviando Opcode 28..."
+                                            );
+                                            let mut out = Vec::with_capacity(
+                                                1 + commit_welcome.commit.len()
+                                                    + commit_welcome
+                                                        .welcome
+                                                        .as_ref()
+                                                        .map(|w| w.len())
+                                                        .unwrap_or(0),
+                                            );
+                                            out.push(28u8); // Opcode 28: DAVE MLS Commit Welcome
+                                            out.extend_from_slice(&commit_welcome.commit);
+                                            if let Some(welcome) = &commit_welcome.welcome {
+                                                out.extend_from_slice(welcome);
+                                            }
+                                            let _ = tx_dave.send(WsMessage::Binary(out.into())).await;
+                                        }
+                                        Ok(None) => {
+                                            println!(
+                                                "[VOICE DAVE] Proposals procesadas, sin commit requerido."
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[VOICE DAVE] Error procesando proposals: {:?}", e)
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+
+                    // Opcode 29: DAVE MLS Announce Commit Transition
+                    29 => {
+                        println!(
+                            "[VOICE DAVE] Recibido Opcode 29 (Announce Commit Transition, {} bytes)",
+                            payload.len()
+                        );
+                        if payload.len() >= 2 {
+                            let transition_id = u16::from_be_bytes([payload[0], payload[1]]);
+                            let commit_data = payload[2..].to_vec();
+                            let tx_dave = tx.clone();
+
+                            tokio::spawn(async move {
+                                let mut guard = audio::dave_session_lock()
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                if let Some(session) = guard.as_mut() {
+                                    match session.process_commit(&commit_data) {
+                                        Ok(()) => {
+                                            println!(
+                                                "[VOICE DAVE] Commit aplicado. Sesión lista: {}",
+                                                session.is_ready()
+                                            );
+                                            // Enviar Opcode 23: DAVE_TRANSITION_READY
+                                            let ready_payload = serde_json::json!({
+                                                "op": 23,
+                                                "d": {
+                                                    "transition_id": transition_id
+                                                }
+                                            });
+                                            let _ = tx_dave
+                                                .send(WsMessage::Text(ready_payload.to_string().into()))
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[VOICE DAVE] Error procesando commit: {:?}", e)
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+
+                    // Opcode 30: DAVE MLS Welcome
+                    30 => {
+                        println!(
+                            "[VOICE DAVE] Recibido Opcode 30 (Welcome, {} bytes)",
+                            payload.len()
+                        );
+                        if payload.len() >= 2 {
+                            let transition_id = u16::from_be_bytes([payload[0], payload[1]]);
+                            let welcome_data = payload[2..].to_vec();
+                            let tx_dave = tx.clone();
+
+                            tokio::spawn(async move {
+                                let mut guard = audio::dave_session_lock()
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                if let Some(session) = guard.as_mut() {
+                                    match session.process_welcome(&welcome_data) {
+                                        Ok(()) => {
+                                            println!(
+                                                "[VOICE DAVE] Welcome aplicado. Sesión lista: {}",
+                                                session.is_ready()
+                                            );
+                                            // Enviar Opcode 23: DAVE_TRANSITION_READY
+                                            let ready_payload = serde_json::json!({
+                                                "op": 23,
+                                                "d": {
+                                                    "transition_id": transition_id
+                                                }
+                                            });
+                                            let _ = tx_dave
+                                                .send(WsMessage::Text(ready_payload.to_string().into()))
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[VOICE DAVE] Error procesando welcome: {:?}", e)
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+
+                    _ => {
+                        tracing::debug!("[VOICE] Binario no manejado: op {}", op);
+                    }
                 }
             }
         }

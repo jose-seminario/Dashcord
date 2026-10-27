@@ -45,6 +45,17 @@ fn pipeline_lock() -> &'static std::sync::Mutex<Option<AudioPipelineHandle>> {
     ACTIVE_AUDIO_PIPELINE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+static DAVE_SESSION: OnceLock<std::sync::Mutex<Option<davey::DaveSession>>> = OnceLock::new();
+static SSRC_TO_USER_ID: OnceLock<std::sync::Mutex<HashMap<u32, u64>>> = OnceLock::new();
+
+pub fn dave_session_lock() -> &'static std::sync::Mutex<Option<davey::DaveSession>> {
+    DAVE_SESSION.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub fn ssrc_map_lock() -> &'static std::sync::Mutex<HashMap<u32, u64>> {
+    SSRC_TO_USER_ID.get_or_init(|| std::sync::Mutex::new(HashMap::new))
+}
+
 /// Buffer de reproducción con protección básica contra Jitter y subdesbordamiento (underrun)
 struct PlaybackJitterBuffer {
     samples: VecDeque<f32>, // Muestras estéreo intercaladas (L, R, L, R...) a 48kHz
@@ -390,6 +401,12 @@ impl VoiceAudioEngine {
                 let _ = std::io::stdout().flush();
             }
         }
+        if let Ok(mut dave) = dave_session_lock().lock() {
+            *dave = None;
+        }
+        if let Ok(mut map) = ssrc_map_lock().lock() {
+            map.clear();
+        }
     }
 
     /// Inicia la recepción (Fase B) y transmisión (Fase C) de audio bidireccional sobre el socket UDP
@@ -555,11 +572,29 @@ impl VoiceAudioEngine {
                 }
 
                 let packet = &recv_buf[..len];
-                let Some((seq, peer_ssrc, opus_data)) =
+                let Some((seq, peer_ssrc, mut opus_data)) =
                     decrypt_rtp_opus_packet(&mode_rx, &secret_key, packet)
                 else {
                     continue;
                 };
+
+                // Si la sesión DAVE E2EE está lista, descifrar el frame Opus entrante
+                if let Ok(mut dave_guard) = dave_session_lock().lock() {
+                    if let Some(dave) = dave_guard.as_mut().filter(|s| s.is_ready()) {
+                        let ssrc_map = ssrc_map_lock().lock().unwrap_or_else(|e| e.into_inner());
+                        let target_uid = ssrc_map.get(&peer_ssrc).copied().or_else(|| {
+                            dave.get_user_ids()
+                                .and_then(|ids| ids.into_iter().find(|&id| id != dave.user_id()))
+                        });
+                        if let Some(uid) = target_uid {
+                            if let Ok(dec_dave) =
+                                dave.decrypt(uid, davey::MediaType::AUDIO, &opus_data)
+                            {
+                                opus_data = dec_dave;
+                            }
+                        }
+                    }
+                }
 
                 // Ignorar paquetes vacíos o de silencio puro de 3 bytes si no hay datos útiles
                 if opus_data.is_empty() {
@@ -863,11 +898,31 @@ impl VoiceAudioEngine {
                         rtp_header[4..8].copy_from_slice(&rtp_timestamp.to_be_bytes());
                         rtp_header[8..12].copy_from_slice(&ssrc.to_be_bytes());
 
+                        // Cifrar con DAVE E2EE si la sesión MLS está lista
+                        let mut dave_holder = Vec::new();
+                        let final_opus_slice: &[u8] = if let Ok(mut dave_guard) =
+                            dave_session_lock().lock()
+                        {
+                            if let Some(dave) = dave_guard.as_mut().filter(|s| s.is_ready()) {
+                                match dave.encrypt_opus(&opus_out_buf[..encoded_len]) {
+                                    Ok(enc) => {
+                                        dave_holder = enc.into_owned();
+                                        &dave_holder[..]
+                                    }
+                                    Err(_) => &opus_out_buf[..encoded_len],
+                                }
+                            } else {
+                                &opus_out_buf[..encoded_len]
+                            }
+                        } else {
+                            &opus_out_buf[..encoded_len]
+                        };
+
                         if let Ok(encrypted_packet) = encrypt_rtp_opus_packet(
                             &mode_tx,
                             &secret_key,
                             &rtp_header,
-                            &opus_out_buf[..encoded_len],
+                            final_opus_slice,
                             nonce_counter,
                         ) {
                             let _ = udp_tx.try_send(&encrypted_packet);
@@ -944,6 +999,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requiere hardware de audio real (tarjeta de sonido), omitido en CI"]
     fn test_audio_hardware_detection_ci_safe() {
         if std::env::var("CI").is_ok() {
             println!("[AUDIO TEST] Entorno CI detectado (sin dispositivo de audio). Omitiendo consulta cpal.");
@@ -953,5 +1009,22 @@ mod tests {
         let host = cpal::default_host();
         let _ = host.default_output_device();
         let _ = host.default_input_device();
+    }
+
+    #[test]
+    fn test_dave_e2ee_init_and_codec() {
+        use davey::DaveSession;
+        use std::num::NonZeroU16;
+        let session = DaveSession::new(
+            NonZeroU16::new(1).unwrap(),
+            123456789,
+            987654321,
+            None,
+        )
+        .expect("Fallo al crear DaveSession");
+
+        assert_eq!(session.user_id(), 123456789);
+        assert_eq!(session.channel_id(), 987654321);
+        assert!(!session.is_ready());
     }
 }

@@ -74,7 +74,6 @@ jobs:
       - name: Run Backend Unit Tests (SuperProperties & Keychain Mock)
         working-directory: src-tauri
         shell: pwsh
-        continue-on-error: true
         env:
           CMAKE_GENERATOR: Ninja
         run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
