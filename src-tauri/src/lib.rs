@@ -3,7 +3,7 @@ pub mod evasion;
 pub mod storage;
 
 use core::gateway::GatewaySnapshot;
-use core::GatewayManager;
+use core::{DiscordRestClient, GatewayManager};
 use evasion::{SuperProperties, VersionResolver};
 use std::io::Write;
 use storage::KeychainManager;
@@ -18,6 +18,15 @@ pub struct GatewayHolder {
     pub manager: Mutex<GatewayManager>,
 }
 
+fn resolve_active_token() -> Result<String, String> {
+    if let Some(tok) = GatewayManager::get_active_token() {
+        if !tok.trim().is_empty() {
+            return Ok(tok);
+        }
+    }
+    KeychainManager::get_token()
+}
+
 #[tauri::command]
 fn get_super_properties() -> Result<SuperProperties, String> {
     Ok(SuperProperties::default())
@@ -26,6 +35,30 @@ fn get_super_properties() -> Result<SuperProperties, String> {
 #[tauri::command]
 fn get_gateway_snapshot() -> Result<GatewaySnapshot, String> {
     Ok(GatewayManager::get_snapshot())
+}
+
+#[tauri::command]
+async fn fetch_channel_messages(
+    channel_id: String,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let token = resolve_active_token()?;
+    let props = SuperProperties::default();
+    let client = DiscordRestClient::new(Some(token), &props)?;
+    client
+        .get_channel_messages(&channel_id, limit.unwrap_or(50))
+        .await
+}
+
+#[tauri::command]
+async fn send_discord_message(
+    channel_id: String,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    let token = resolve_active_token()?;
+    let props = SuperProperties::default();
+    let client = DiscordRestClient::new(Some(token), &props)?;
+    client.send_message(&channel_id, &content).await
 }
 
 #[tauri::command]
@@ -104,9 +137,7 @@ async fn check_version_status() -> Result<SuperProperties, String> {
 }
 
 #[tauri::command]
-async fn start_gateway_session(
-    gateway: State<'_, GatewayHolder>,
-) -> Result<String, String> {
+async fn start_gateway_session(gateway: State<'_, GatewayHolder>) -> Result<String, String> {
     let mut mgr = gateway.manager.lock().await;
     mgr.start_session().await
 }
@@ -115,7 +146,9 @@ async fn start_gateway_session(
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let is_dry_run = args.iter().any(|arg| arg == "--dry-run")
-        || std::env::var("DASHCORD_DRY_RUN").map(|v| v == "1").unwrap_or(false);
+        || std::env::var("DASHCORD_DRY_RUN")
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
     if is_dry_run {
         println!("[DRY-RUN] Starting DashCord in dry-run mode");
@@ -133,7 +166,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
-            // Manejador de errores / pánicos global de Rust que imprime en consola y notifica al frontend
             std::panic::set_hook(Box::new(move |panic_info| {
                 let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
                     (*s).to_string()
@@ -154,10 +186,8 @@ pub fn run() {
                 let _ = std::io::stdout().flush();
                 let _ = std::io::stderr().flush();
 
-                let _ = app_handle.emit(
-                    "gateway-error",
-                    serde_json::json!({ "message": full_err }),
-                );
+                let _ =
+                    app_handle.emit("gateway-error", serde_json::json!({ "message": full_err }));
             }));
 
             Ok(())
@@ -169,6 +199,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_super_properties,
             get_gateway_snapshot,
+            fetch_channel_messages,
+            send_discord_message,
             save_token,
             connect_saved_token,
             get_token,
@@ -193,7 +225,6 @@ mod tests {
             manager: Mutex::new(GatewayManager::new(true)),
         };
 
-        // Si el future retuviera un MutexGuard no-Send a través de .await, este bloque no compila:
         let fut = async move {
             let mut mgr = holder.manager.lock().await;
             mgr.start_session().await

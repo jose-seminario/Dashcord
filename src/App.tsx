@@ -37,6 +37,8 @@ export const App: React.FC = () => {
   useEffect(() => {
     let unlistenReady: UnlistenFn | undefined;
     let unlistenMsg: UnlistenFn | undefined;
+    let unlistenPres: UnlistenFn | undefined;
+    let unlistenVoice: UnlistenFn | undefined;
     let unlistenErr: UnlistenFn | undefined;
     let isMounted = true;
 
@@ -56,6 +58,20 @@ export const App: React.FC = () => {
       }
     };
 
+    const onDomPresence = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      if (customEvt.detail) {
+        useAppStore.getState().handlePresenceUpdate(customEvt.detail);
+      }
+    };
+
+    const onDomVoice = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      if (customEvt.detail) {
+        useAppStore.getState().handleVoiceStateUpdate(customEvt.detail);
+      }
+    };
+
     const onDomError = (e: Event) => {
       const customEvt = e as CustomEvent;
       const detail = customEvt.detail;
@@ -69,6 +85,8 @@ export const App: React.FC = () => {
 
     window.addEventListener('dashcord:gateway-ready', onDomReady);
     window.addEventListener('dashcord:gateway-message-create', onDomMessage);
+    window.addEventListener('dashcord:gateway-presence-update', onDomPresence);
+    window.addEventListener('dashcord:gateway-voice-state-update', onDomVoice);
     window.addEventListener('dashcord:gateway-error', onDomError);
 
     // B) Listeners de la API de eventos de Tauri v2 (@tauri-apps/api/event)
@@ -94,6 +112,28 @@ export const App: React.FC = () => {
         else uMsg();
       } catch (err) {
         console.warn('[IPC TAURI] Aviso al registrar listener gateway-message-create:', err);
+      }
+
+      try {
+        const uPres = await listen<any>('gateway-presence-update', (event) => {
+          if (!isMounted) return;
+          useAppStore.getState().handlePresenceUpdate(event.payload);
+        });
+        if (isMounted) unlistenPres = uPres;
+        else uPres();
+      } catch (err) {
+        console.warn('[IPC TAURI] Aviso al registrar listener gateway-presence-update:', err);
+      }
+
+      try {
+        const uVoice = await listen<any>('gateway-voice-state-update', (event) => {
+          if (!isMounted) return;
+          useAppStore.getState().handleVoiceStateUpdate(event.payload);
+        });
+        if (isMounted) unlistenVoice = uVoice;
+        else uVoice();
+      } catch (err) {
+        console.warn('[IPC TAURI] Aviso al registrar listener gateway-voice-state-update:', err);
       }
 
       try {
@@ -139,15 +179,18 @@ export const App: React.FC = () => {
       isMounted = false;
       window.removeEventListener('dashcord:gateway-ready', onDomReady);
       window.removeEventListener('dashcord:gateway-message-create', onDomMessage);
+      window.removeEventListener('dashcord:gateway-presence-update', onDomPresence);
+      window.removeEventListener('dashcord:gateway-voice-state-update', onDomVoice);
       window.removeEventListener('dashcord:gateway-error', onDomError);
       if (unlistenReady) unlistenReady();
       if (unlistenMsg) unlistenMsg();
+      if (unlistenPres) unlistenPres();
+      if (unlistenVoice) unlistenVoice();
       if (unlistenErr) unlistenErr();
     };
   }, []);
 
   // 2. Respaldo de sincronización por comando IPC (`get_gateway_snapshot`)
-  // Garantiza que si el evento READY ocurrió en milisegundos, React lo reciba inmediatamente
   useEffect(() => {
     const intervalMs = isConnecting ? 300 : 1200;
     const timer = setInterval(async () => {
@@ -157,6 +200,8 @@ export const App: React.FC = () => {
           ready_payload?: any;
           error_message?: string;
           recent_messages?: any[];
+          recent_presences?: any[];
+          recent_voice_states?: any[];
         }>('get_gateway_snapshot');
 
         const state = useAppStore.getState();
@@ -172,6 +217,18 @@ export const App: React.FC = () => {
         if (snap.recent_messages && snap.recent_messages.length > 0) {
           for (const msg of snap.recent_messages) {
             state.handleGatewayMessage(msg);
+          }
+        }
+
+        if (snap.recent_presences && snap.recent_presences.length > 0) {
+          for (const pres of snap.recent_presences) {
+            state.handlePresenceUpdate(pres);
+          }
+        }
+
+        if (snap.recent_voice_states && snap.recent_voice_states.length > 0) {
+          for (const vs of snap.recent_voice_states) {
+            state.handleVoiceStateUpdate(vs);
           }
         }
       } catch {

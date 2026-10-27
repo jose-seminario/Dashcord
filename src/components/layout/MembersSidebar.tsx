@@ -1,5 +1,5 @@
 import React from 'react';
-import { useAppStore } from '../../stores/useAppStore';
+import { useAppStore, resolveAvatarUrl } from '../../stores/useAppStore';
 import { Shield } from 'lucide-react';
 
 export const MembersSidebar: React.FC = () => {
@@ -7,18 +7,25 @@ export const MembersSidebar: React.FC = () => {
     isMembersSidebarOpen,
     selectedGuildId,
     members,
+    currentUser,
   } = useAppStore();
 
   if (!isMembersSidebarOpen) return null;
 
-  const currentMembers = members[selectedGuildId] || [];
+  const currentMembers = members[selectedGuildId] || [currentUser];
 
   const onlineMembers = currentMembers.filter((m) => m.status === 'online');
   const idleMembers = currentMembers.filter((m) => m.status === 'idle');
   const dndMembers = currentMembers.filter((m) => m.status === 'dnd');
-  const offlineMembers = currentMembers.filter((m) => m.status === 'offline');
+  const offlineMembers = currentMembers.filter(
+    (m) => !m.status || m.status === 'offline' || m.status === 'invisible'
+  );
 
-  const renderMemberGroup = (title: string, group: typeof currentMembers, statusColor: string) => {
+  const renderMemberGroup = (
+    title: string,
+    group: typeof currentMembers,
+    statusColor: string
+  ) => {
     if (group.length === 0) return null;
     return (
       <div className="space-y-1 mb-4">
@@ -32,9 +39,12 @@ export const MembersSidebar: React.FC = () => {
           >
             <div className="relative flex-shrink-0">
               <img
-                src={member.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=128'}
+                src={resolveAvatarUrl(member.id, member.avatar)}
                 alt={member.username}
-                className="w-8 h-8 rounded-full object-cover border border-border-subtle"
+                className="w-8 h-8 rounded-full object-cover border border-border-subtle bg-base"
+                onError={(e) => {
+                  e.currentTarget.src = 'https://cdn.discordapp.com/embed/avatars/0.png';
+                }}
               />
               <span
                 className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ring-2 ring-surface ${statusColor}`}
@@ -45,8 +55,13 @@ export const MembersSidebar: React.FC = () => {
                 <span className="text-xs font-medium text-secondary_text group-hover:text-primary truncate">
                   {member.global_name || member.username}
                 </span>
-                {member.username === 'DashOperator' && (
+                {member.id === currentUser.id && (
                   <Shield className="w-3 h-3 text-accent-cyan flex-shrink-0" />
+                )}
+                {member.is_bot && (
+                  <span className="px-1 py-0.1 bg-accent-primary/20 border border-accent-primary/40 text-accent-cyan text-[8px] font-bold uppercase rounded">
+                    BOT
+                  </span>
                 )}
               </div>
               {member.custom_status && (

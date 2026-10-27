@@ -1,6 +1,15 @@
 import React from 'react';
-import { Hash, Volume2, Megaphone, Mic, Headphones, Settings, ChevronDown } from 'lucide-react';
-import { useAppStore } from '../../stores/useAppStore';
+import {
+  Hash,
+  Volume2,
+  Megaphone,
+  Mic,
+  MicOff,
+  Headphones,
+  Settings,
+  ChevronDown,
+} from 'lucide-react';
+import { useAppStore, resolveAvatarUrl } from '../../stores/useAppStore';
 
 export const ChannelSidebar: React.FC = () => {
   const {
@@ -9,6 +18,7 @@ export const ChannelSidebar: React.FC = () => {
     selectedChannelId,
     setSelectedChannel,
     currentUser,
+    voiceStates,
     setSettingsOpen,
   } = useAppStore();
 
@@ -18,11 +28,11 @@ export const ChannelSidebar: React.FC = () => {
   const getChannelIcon = (type: string) => {
     switch (type) {
       case 'voice':
-        return <Volume2 className="w-4 h-4 text-accent-cyan" />;
+        return <Volume2 className="w-4 h-4 text-accent-cyan flex-shrink-0" />;
       case 'announcement':
-        return <Megaphone className="w-4 h-4 text-amber-400" />;
+        return <Megaphone className="w-4 h-4 text-amber-400 flex-shrink-0" />;
       default:
-        return <Hash className="w-4 h-4 text-muted" />;
+        return <Hash className="w-4 h-4 text-muted flex-shrink-0" />;
     }
   };
 
@@ -39,11 +49,7 @@ export const ChannelSidebar: React.FC = () => {
     }
   };
 
-  const userAvatarSrc = currentUser.avatar
-    ? (currentUser.avatar.startsWith('http')
-        ? currentUser.avatar
-        : `https://cdn.discordapp.com/avatars/${currentUser.id}/${currentUser.avatar}.png?size=128`)
-    : 'https://images.unsplash.com/photo-1566492031773-4f4e44671857?w=128';
+  const userAvatarSrc = resolveAvatarUrl(currentUser.id, currentUser.avatar);
 
   return (
     <nav className="w-60 bg-surface flex flex-col border-r border-border-subtle select-none">
@@ -69,22 +75,62 @@ export const ChannelSidebar: React.FC = () => {
         ) : (
           channels.map((channel) => {
             const isSelected = selectedChannelId === channel.id;
+            const voiceUsers = voiceStates[channel.id] || [];
+
             return (
-              <button
-                key={channel.id}
-                onClick={() => setSelectedChannel(channel.id)}
-                className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-sm transition-all duration-150 ${
-                  isSelected
-                    ? 'bg-active text-primary font-medium border-l-2 border-accent-cyan'
-                    : 'text-secondary_text hover:text-primary hover:bg-hover'
-                }`}
-              >
-                {getChannelIcon(channel.type)}
-                <span className="truncate">{channel.name}</span>
-                {channel.unread && !isSelected && (
-                  <div className="w-1.5 h-1.5 rounded-full bg-accent-cyan ml-auto" />
+              <div key={channel.id} className="space-y-0.5">
+                <button
+                  onClick={() => setSelectedChannel(channel.id)}
+                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-sm transition-all duration-150 ${
+                    isSelected
+                      ? 'bg-active text-primary font-medium border-l-2 border-accent-cyan'
+                      : 'text-secondary_text hover:text-primary hover:bg-hover'
+                  }`}
+                >
+                  {getChannelIcon(channel.type)}
+                  <span className="truncate">{channel.name}</span>
+                  {voiceUsers.length > 0 && (
+                    <span className="ml-auto text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-accent-cyan/15 text-accent-cyan border border-accent-cyan/30">
+                      {voiceUsers.length}
+                    </span>
+                  )}
+                  {channel.unread && !isSelected && voiceUsers.length === 0 && (
+                    <div className="w-1.5 h-1.5 rounded-full bg-accent-cyan ml-auto" />
+                  )}
+                </button>
+
+                {/* Usuarios conectados al canal de voz */}
+                {voiceUsers.length > 0 && (
+                  <div className="pl-6 pr-2 py-1 space-y-1">
+                    {voiceUsers.map((vu) => (
+                      <div
+                        key={vu.user_id}
+                        className="flex items-center gap-2 px-2 py-1 rounded-md bg-base/40 border border-border-subtle/50 text-xs text-secondary_text"
+                      >
+                        <div className="relative flex-shrink-0">
+                          <img
+                            src={resolveAvatarUrl(vu.user_id, vu.avatar)}
+                            alt={vu.username}
+                            className="w-5 h-5 rounded-full object-cover ring-1 ring-emerald-400/70"
+                            onError={(e) => {
+                              e.currentTarget.src =
+                                'https://cdn.discordapp.com/embed/avatars/0.png';
+                            }}
+                          />
+                        </div>
+                        <span className="truncate flex-1 text-[11px] font-medium text-primary">
+                          {vu.username}
+                        </span>
+                        {vu.self_mute ? (
+                          <MicOff className="w-3 h-3 text-rose-400 flex-shrink-0" />
+                        ) : (
+                          <Volume2 className="w-3 h-3 text-emerald-400 flex-shrink-0 animate-pulse" />
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 )}
-              </button>
+              </div>
             );
           })
         )}
@@ -97,7 +143,10 @@ export const ChannelSidebar: React.FC = () => {
             <img
               src={userAvatarSrc}
               alt={currentUser.username}
-              className="w-8 h-8 rounded-full object-cover border border-border-subtle"
+              className="w-8 h-8 rounded-full object-cover border border-border-subtle bg-surface"
+              onError={(e) => {
+                e.currentTarget.src = 'https://cdn.discordapp.com/embed/avatars/0.png';
+              }}
             />
             <span
               className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ring-2 ring-base ${getStatusColor(
@@ -110,7 +159,7 @@ export const ChannelSidebar: React.FC = () => {
               {currentUser.global_name || currentUser.username}
             </span>
             <span className="text-[10px] text-muted truncate">
-              {currentUser.custom_status || `#${currentUser.discriminator}`}
+              {currentUser.custom_status || `@${currentUser.username}`}
             </span>
           </div>
         </div>

@@ -1,7 +1,11 @@
-use crate::core::models::{FrontendChannel, FrontendGuild, FrontendReadyPayload, UserPayload};
+use crate::core::models::{
+    FrontendChannel, FrontendGuild, FrontendReadyPayload, PresenceUpdatePayload, UserPayload,
+    VoiceStatePayload,
+};
 use crate::evasion::SuperProperties;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
@@ -26,6 +30,8 @@ pub struct GatewaySnapshot {
     pub ready_payload: Option<FrontendReadyPayload>,
     pub error_message: Option<String>,
     pub recent_messages: Vec<serde_json::Value>,
+    pub recent_presences: Vec<PresenceUpdatePayload>,
+    pub recent_voice_states: Vec<VoiceStatePayload>,
 }
 
 static SHARED_SNAPSHOT: OnceLock<std::sync::Mutex<GatewaySnapshot>> = OnceLock::new();
@@ -33,6 +39,7 @@ static ACTIVE_ABORT_HANDLE: OnceLock<std::sync::Mutex<Option<tokio::task::AbortH
     OnceLock::new();
 static LAST_CONNECT_ATTEMPT: OnceLock<std::sync::Mutex<Option<(String, Instant)>>> =
     OnceLock::new();
+static ACTIVE_TOKEN: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 
 fn snapshot_lock() -> &'static std::sync::Mutex<GatewaySnapshot> {
     SHARED_SNAPSHOT.get_or_init(|| {
@@ -41,6 +48,8 @@ fn snapshot_lock() -> &'static std::sync::Mutex<GatewaySnapshot> {
             ready_payload: None,
             error_message: None,
             recent_messages: Vec::new(),
+            recent_presences: Vec::new(),
+            recent_voice_states: Vec::new(),
         })
     })
 }
@@ -53,15 +62,37 @@ fn attempt_lock() -> &'static std::sync::Mutex<Option<(String, Instant)>> {
     LAST_CONNECT_ATTEMPT.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+fn token_lock() -> &'static std::sync::Mutex<Option<String>> {
+    ACTIVE_TOKEN.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Extrae el custom_status o actividad actual desde el array `activities` de una presencia de Discord
+fn extract_custom_status(activities: Option<&Vec<serde_json::Value>>) -> Option<String> {
+    let acts = activities?;
+    for act in acts {
+        let act_type = act["type"].as_u64().unwrap_or(99);
+        if act_type == 4 {
+            // Custom status
+            if let Some(state) = act["state"].as_str() {
+                if !state.trim().is_empty() {
+                    return Some(state.to_string());
+                }
+            }
+        } else if let Some(name) = act["name"].as_str() {
+            if !name.trim().is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Emite un evento al frontend usando simultáneamente:
 /// 1) `app.emit` global (Tauri v2 Emitter)
 /// 2) `window.emit` directo a la ventana "main"
 /// 3) `window.eval` despachando un CustomEvent DOM nativo en el WebView
 fn emit_ipc_event<S: Serialize + Clone>(app: &tauri::AppHandle, event_name: &str, payload: &S) {
-    match app.emit(event_name, payload.clone()) {
-        Ok(_) => println!("[IPC] Evento '{}' emitido globalmente (app.emit OK)", event_name),
-        Err(e) => eprintln!("[IPC WARN] Error en app.emit('{}'): {}", event_name, e),
-    }
+    let _ = app.emit(event_name, payload.clone());
 
     if let Some(main_win) = app.get_webview_window("main") {
         let _ = main_win.emit(event_name, payload.clone());
@@ -127,12 +158,18 @@ impl GatewayManager {
         }
     }
 
+    /// Obtiene el token activo en memoria (si ya se autenticó en la sesión actual)
+    pub fn get_active_token() -> Option<String> {
+        token_lock().lock().ok().and_then(|g| g.clone())
+    }
+
     /// Devuelve una copia instantánea del estado actual del Gateway para consulta directa desde React
     pub fn get_snapshot() -> GatewaySnapshot {
         if let Ok(mut guard) = snapshot_lock().lock() {
             let snap = guard.clone();
-            // Limpiar cola de mensajes recientes una vez entregados al frontend
             guard.recent_messages.clear();
+            guard.recent_presences.clear();
+            guard.recent_voice_states.clear();
             snap
         } else {
             GatewaySnapshot::default()
@@ -162,6 +199,10 @@ impl GatewayManager {
             .trim()
             .to_string();
 
+        if let Ok(mut tok_guard) = token_lock().lock() {
+            *tok_guard = Some(clean_token.clone());
+        }
+
         // Evitar ejecuciones duplicadas en ráfaga (< 3 segundos con el mismo token)
         if let Ok(mut attempt_guard) = attempt_lock().lock() {
             if let Some((ref prev_token, prev_instant)) = *attempt_guard {
@@ -172,7 +213,6 @@ impl GatewayManager {
                     );
                     let _ = std::io::stdout().flush();
 
-                    // Si ya teníamos el payload READY listo, re-emitirlo inmediatamente al frontend
                     if let Ok(snap) = snapshot_lock().lock() {
                         if snap.status == "ready" {
                             if let Some(ref ready_data) = snap.ready_payload {
@@ -194,7 +234,6 @@ impl GatewayManager {
             }
         }
 
-        // Actualizar snapshot a "connecting"
         if let Ok(mut snap) = snapshot_lock().lock() {
             snap.status = "connecting".to_string();
             snap.error_message = None;
@@ -260,15 +299,19 @@ impl GatewayManager {
             println!("[GATEWAY] Conectado exitosamente");
             let _ = std::io::stdout().flush();
 
+            let mock_user = UserPayload {
+                id: "usr_me".to_string(),
+                username: "DashOperator".to_string(),
+                discriminator: "0001".to_string(),
+                global_name: Some("GhostProtocol".to_string()),
+                avatar: None,
+                status: "online".to_string(),
+                custom_status: Some("⚡ Dry-Run Mode".to_string()),
+                is_bot: Some(false),
+            };
+
             let mock_payload = FrontendReadyPayload {
-                user: UserPayload {
-                    id: "usr_me".to_string(),
-                    username: "DashOperator".to_string(),
-                    discriminator: "0001".to_string(),
-                    global_name: Some("GhostProtocol".to_string()),
-                    avatar: None,
-                    status: "online".to_string(),
-                },
+                user: mock_user.clone(),
                 guilds: vec![FrontendGuild {
                     id: "guild_1".to_string(),
                     name: "Cyberpunk Syndicate".to_string(),
@@ -292,6 +335,8 @@ impl GatewayManager {
                             unread: false,
                         },
                     ],
+                    members: vec![mock_user],
+                    voice_states: Vec::new(),
                 }],
             };
 
@@ -305,9 +350,7 @@ impl GatewayManager {
         }
 
         println!("[NET] Connecting to {}", GATEWAY_URL);
-        eprintln!("[NET] Connecting to {}", GATEWAY_URL);
         let _ = std::io::stdout().flush();
-        let _ = std::io::stderr().flush();
 
         // 1. Construir la solicitud HTTP para el handshake con cabeceras de navegador Chrome
         let mut request = GATEWAY_URL
@@ -317,10 +360,9 @@ impl GatewayManager {
         request
             .headers_mut()
             .insert("User-Agent", HeaderValue::from_static(CHROME_USER_AGENT));
-        request.headers_mut().insert(
-            "Origin",
-            HeaderValue::from_static("https://discord.com"),
-        );
+        request
+            .headers_mut()
+            .insert("Origin", HeaderValue::from_static("https://discord.com"));
         request.headers_mut().insert(
             "Accept-Language",
             HeaderValue::from_static("es-ES,es;q=0.9,en;q=0.8"),
@@ -332,7 +374,6 @@ impl GatewayManager {
             .headers_mut()
             .insert("Pragma", HeaderValue::from_static("no-cache"));
 
-        // Configuración sin límite de tamaño de frame/mensaje para soportar payloads READY masivos
         let mut ws_config = WebSocketConfig::default();
         ws_config.max_message_size = None;
         ws_config.max_frame_size = None;
@@ -362,9 +403,7 @@ impl GatewayManager {
         };
 
         println!("[GATEWAY] Conexión establecida, esperando HELLO...");
-        eprintln!("[GATEWAY] Conexión establecida, esperando HELLO...");
         let _ = std::io::stdout().flush();
-        let _ = std::io::stderr().flush();
 
         let (mut write_half, mut read_half) = ws_stream.split();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
@@ -384,6 +423,8 @@ impl GatewayManager {
         let mut heartbeat_task: Option<tokio::task::JoinHandle<()>> = None;
         let mut ready_received = false;
         let mut error_emitted = false;
+        let mut known_users: HashMap<String, UserPayload> = HashMap::new();
+        let mut guild_ids_order: Vec<String> = Vec::new();
 
         // 4. Bucle principal de lectura del Gateway
         while let Some(msg_result) = read_half.next().await {
@@ -406,13 +447,11 @@ impl GatewayManager {
                 }
             };
 
-            // Responder a tramas Ping del servidor
             if let WsMessage::Ping(payload) = msg {
                 let _ = tx.send(WsMessage::Pong(payload)).await;
                 continue;
             }
 
-            // Manejo de Close Frame
             if let WsMessage::Close(ref frame) = msg {
                 let err_msg = if let Some(cf) = frame {
                     let code: u16 = cf.code.into();
@@ -427,9 +466,6 @@ impl GatewayManager {
                 };
 
                 println!("[GATEWAY ERROR] {}", err_msg);
-                eprintln!("[GATEWAY ERROR] {}", err_msg);
-                let _ = std::io::stderr().flush();
-
                 if let Ok(mut snap) = snapshot_lock().lock() {
                     snap.status = "error".to_string();
                     snap.error_message = Some(err_msg.clone());
@@ -445,7 +481,6 @@ impl GatewayManager {
                     continue;
                 };
 
-                // Actualizar número de secuencia si viene en el payload
                 if let Some(s) = val["s"].as_u64() {
                     *seq.lock().await = Some(s);
                 }
@@ -455,9 +490,8 @@ impl GatewayManager {
                 match op {
                     // Opcode 10: HELLO
                     10 => {
-                        let heartbeat_interval = val["d"]["heartbeat_interval"]
-                            .as_u64()
-                            .unwrap_or(41250);
+                        let heartbeat_interval =
+                            val["d"]["heartbeat_interval"].as_u64().unwrap_or(41250);
 
                         let jitter = random_jitter();
                         let first_delay_ms = ((heartbeat_interval as f64) * jitter) as u64;
@@ -548,8 +582,6 @@ impl GatewayManager {
                     9 => {
                         let err_msg = "Token inválido o expirado".to_string();
                         println!("[GATEWAY ERROR] Opcode 9 (Invalid Session): {}", err_msg);
-                        eprintln!("[GATEWAY ERROR] Opcode 9 (Invalid Session): {}", err_msg);
-                        let _ = std::io::stderr().flush();
                         if let Ok(mut snap) = snapshot_lock().lock() {
                             snap.status = "error".to_string();
                             snap.error_message = Some(err_msg.clone());
@@ -574,9 +606,7 @@ impl GatewayManager {
                             ready_received = true;
 
                             println!("[GATEWAY] Conectado exitosamente");
-                            eprintln!("[GATEWAY] Conectado exitosamente");
                             let _ = std::io::stdout().flush();
-                            let _ = std::io::stderr().flush();
                             tracing::info!("[GATEWAY] Conectado exitosamente");
 
                             let d = &val["d"];
@@ -592,11 +622,77 @@ impl GatewayManager {
                                 global_name: u["global_name"].as_str().map(|s| s.to_string()),
                                 avatar: u["avatar"].as_str().map(|s| s.to_string()),
                                 status: "online".to_string(),
+                                custom_status: Some("⚡ Conectado vía DashCord".to_string()),
+                                is_bot: Some(false),
                             };
 
+                            known_users.insert(current_user.id.clone(), current_user.clone());
+
+                            // 1. Indexar d["users"] globales del evento READY
+                            if let Some(users_arr) = d["users"].as_array() {
+                                for usr in users_arr {
+                                    if let Some(uid) = usr["id"].as_str() {
+                                        let u_payload = UserPayload {
+                                            id: uid.to_string(),
+                                            username: usr["username"]
+                                                .as_str()
+                                                .unwrap_or("Usuario")
+                                                .to_string(),
+                                            discriminator: usr["discriminator"]
+                                                .as_str()
+                                                .unwrap_or("0000")
+                                                .to_string(),
+                                            global_name: usr["global_name"]
+                                                .as_str()
+                                                .map(|s| s.to_string()),
+                                            avatar: usr["avatar"].as_str().map(|s| s.to_string()),
+                                            status: "offline".to_string(),
+                                            custom_status: None,
+                                            is_bot: usr["bot"].as_bool(),
+                                        };
+                                        known_users.insert(uid.to_string(), u_payload);
+                                    }
+                                }
+                            }
+
+                            // 2. Indexar presencias globales (d["presences"] y d["merged_presences"]["friends"])
+                            let mut global_presences: HashMap<String, (String, Option<String>)> =
+                                HashMap::new();
+                            if let Some(pres_arr) = d["presences"].as_array() {
+                                for p in pres_arr {
+                                    if let Some(uid) =
+                                        p["user"]["id"].as_str().or_else(|| p["user_id"].as_str())
+                                    {
+                                        let st =
+                                            p["status"].as_str().unwrap_or("offline").to_string();
+                                        let cs = extract_custom_status(p["activities"].as_array());
+                                        global_presences.insert(uid.to_string(), (st, cs));
+                                    }
+                                }
+                            }
+                            if let Some(friends_pres) = d["merged_presences"]["friends"].as_array()
+                            {
+                                for p in friends_pres {
+                                    if let Some(uid) =
+                                        p["user_id"].as_str().or_else(|| p["user"]["id"].as_str())
+                                    {
+                                        let st =
+                                            p["status"].as_str().unwrap_or("offline").to_string();
+                                        let cs = extract_custom_status(p["activities"].as_array());
+                                        global_presences.insert(uid.to_string(), (st, cs));
+                                    }
+                                }
+                            }
+
+                            let merged_members_outer = d["merged_members"].as_array();
+                            let merged_presences_guilds =
+                                d["merged_presences"]["guilds"].as_array();
+
                             let mut guilds_list = Vec::new();
+                            guild_ids_order.clear();
+
                             if let Some(guilds_raw) = d["guilds"].as_array() {
-                                for g in guilds_raw {
+                                for (g_idx, g) in guilds_raw.iter().enumerate() {
                                     let props = if g["properties"].is_object() {
                                         &g["properties"]
                                     } else {
@@ -608,6 +704,8 @@ impl GatewayManager {
                                         .or_else(|| props["id"].as_str())
                                         .unwrap_or("")
                                         .to_string();
+                                    guild_ids_order.push(guild_id.clone());
+
                                     let guild_name = props["name"]
                                         .as_str()
                                         .or_else(|| g["name"].as_str())
@@ -618,6 +716,7 @@ impl GatewayManager {
                                         .or_else(|| g["icon"].as_str())
                                         .map(|s| s.to_string());
 
+                                    // Canales del servidor
                                     let mut channels = Vec::new();
                                     if let Some(ch_raw) = g["channels"].as_array() {
                                         for ch in ch_raw {
@@ -646,13 +745,232 @@ impl GatewayManager {
                                         }
                                     }
 
+                                    // Presencias específicas del servidor
+                                    let mut guild_presences = global_presences.clone();
+                                    if let Some(gp_arr) = g["presences"].as_array() {
+                                        for p in gp_arr {
+                                            if let Some(uid) = p["user"]["id"]
+                                                .as_str()
+                                                .or_else(|| p["user_id"].as_str())
+                                            {
+                                                let st = p["status"]
+                                                    .as_str()
+                                                    .unwrap_or("offline")
+                                                    .to_string();
+                                                let cs = extract_custom_status(
+                                                    p["activities"].as_array(),
+                                                );
+                                                guild_presences.insert(uid.to_string(), (st, cs));
+                                            }
+                                        }
+                                    }
+                                    if let Some(mpg) = merged_presences_guilds {
+                                        if let Some(gp_arr) =
+                                            mpg.get(g_idx).and_then(|v| v.as_array())
+                                        {
+                                            for p in gp_arr {
+                                                if let Some(uid) = p["user_id"]
+                                                    .as_str()
+                                                    .or_else(|| p["user"]["id"].as_str())
+                                                {
+                                                    let st = p["status"]
+                                                        .as_str()
+                                                        .unwrap_or("offline")
+                                                        .to_string();
+                                                    let cs = extract_custom_status(
+                                                        p["activities"].as_array(),
+                                                    );
+                                                    guild_presences
+                                                        .insert(uid.to_string(), (st, cs));
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Miembros del servidor
+                                    let mut members_map: HashMap<String, UserPayload> =
+                                        HashMap::new();
+                                    members_map
+                                        .insert(current_user.id.clone(), current_user.clone());
+
+                                    let mut parse_member_entry = |m: &serde_json::Value| {
+                                        let nick = m["nick"].as_str().map(|s| s.to_string());
+                                        if let Some(u_obj) = m["user"].as_object() {
+                                            if let Some(uid) =
+                                                u_obj.get("id").and_then(|v| v.as_str())
+                                            {
+                                                let (st, cs) = guild_presences
+                                                    .get(uid)
+                                                    .cloned()
+                                                    .unwrap_or_else(|| {
+                                                        ("offline".to_string(), None)
+                                                    });
+                                                let global_n = nick.or_else(|| {
+                                                    u_obj
+                                                        .get("global_name")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string())
+                                                });
+                                                let user_entry = UserPayload {
+                                                    id: uid.to_string(),
+                                                    username: u_obj
+                                                        .get("username")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("Usuario")
+                                                        .to_string(),
+                                                    discriminator: u_obj
+                                                        .get("discriminator")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("0000")
+                                                        .to_string(),
+                                                    global_name: global_n,
+                                                    avatar: u_obj
+                                                        .get("avatar")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string()),
+                                                    status: if uid == current_user.id {
+                                                        "online".to_string()
+                                                    } else {
+                                                        st
+                                                    },
+                                                    custom_status: cs,
+                                                    is_bot: u_obj
+                                                        .get("bot")
+                                                        .and_then(|v| v.as_bool()),
+                                                };
+                                                known_users
+                                                    .insert(uid.to_string(), user_entry.clone());
+                                                members_map.insert(uid.to_string(), user_entry);
+                                            }
+                                        } else if let Some(uid) = m["user_id"].as_str() {
+                                            if let Some(base_user) = known_users.get(uid) {
+                                                let (st, cs) = guild_presences
+                                                    .get(uid)
+                                                    .cloned()
+                                                    .unwrap_or_else(|| {
+                                                        ("offline".to_string(), None)
+                                                    });
+                                                let mut u_clone = base_user.clone();
+                                                if nick.is_some() {
+                                                    u_clone.global_name = nick;
+                                                }
+                                                u_clone.status = if uid == current_user.id {
+                                                    "online".to_string()
+                                                } else {
+                                                    st
+                                                };
+                                                if cs.is_some() {
+                                                    u_clone.custom_status = cs;
+                                                }
+                                                members_map.insert(uid.to_string(), u_clone);
+                                            }
+                                        }
+                                    };
+
+                                    if let Some(m_arr) = g["members"].as_array() {
+                                        for m in m_arr {
+                                            parse_member_entry(m);
+                                        }
+                                    }
+                                    if let Some(mm_outer) = merged_members_outer {
+                                        if let Some(m_arr) =
+                                            mm_outer.get(g_idx).and_then(|v| v.as_array())
+                                        {
+                                            for m in m_arr {
+                                                parse_member_entry(m);
+                                            }
+                                        }
+                                    }
+
+                                    // Añadir también usuarios con presencia activa en el servidor
+                                    for (uid, (st, cs)) in &guild_presences {
+                                        if !members_map.contains_key(uid) {
+                                            if let Some(base_u) = known_users.get(uid) {
+                                                let mut u_clone = base_u.clone();
+                                                u_clone.status = st.clone();
+                                                u_clone.custom_status = cs.clone();
+                                                members_map.insert(uid.clone(), u_clone);
+                                            }
+                                        }
+                                    }
+
+                                    // Estados de voz iniciales del servidor
+                                    let mut voice_states = Vec::new();
+                                    if let Some(vs_arr) = g["voice_states"].as_array() {
+                                        for vs in vs_arr {
+                                            if let Some(uid) = vs["user_id"].as_str() {
+                                                let ch_id = vs["channel_id"]
+                                                    .as_str()
+                                                    .map(|s| s.to_string());
+                                                if ch_id.is_some() {
+                                                    let u_info = members_map
+                                                        .get(uid)
+                                                        .or_else(|| known_users.get(uid));
+                                                    let uname = u_info
+                                                        .and_then(|u| {
+                                                            u.global_name.clone().or_else(|| {
+                                                                Some(u.username.clone())
+                                                            })
+                                                        })
+                                                        .unwrap_or_else(|| "Usuario".to_string());
+                                                    let uavatar =
+                                                        u_info.and_then(|u| u.avatar.clone());
+
+                                                    voice_states.push(VoiceStatePayload {
+                                                        user_id: uid.to_string(),
+                                                        channel_id: ch_id,
+                                                        guild_id: Some(guild_id.clone()),
+                                                        username: uname,
+                                                        avatar: uavatar,
+                                                        self_mute: vs["self_mute"]
+                                                            .as_bool()
+                                                            .unwrap_or(false),
+                                                        self_deaf: vs["self_deaf"]
+                                                            .as_bool()
+                                                            .unwrap_or(false),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    let members_vec: Vec<UserPayload> =
+                                        members_map.into_values().collect();
+
                                     guilds_list.push(FrontendGuild {
-                                        id: guild_id,
+                                        id: guild_id.clone(),
                                         name: guild_name,
                                         icon: guild_icon,
                                         unread_count: 0,
                                         channels,
+                                        members: members_vec,
+                                        voice_states,
                                     });
+
+                                    // Enviar Opcode 14 (Lazy Request) para el primer canal de texto del servidor para suscribirse a presencias y miembros
+                                    if let Some(first_ch) =
+                                        guilds_list.last().and_then(|gl| gl.channels.first())
+                                    {
+                                        let mut ch_ranges = serde_json::Map::new();
+                                        ch_ranges.insert(
+                                            first_ch.id.clone(),
+                                            serde_json::json!([[0, 99]]),
+                                        );
+                                        let sub_msg = serde_json::json!({
+                                            "op": 14,
+                                            "d": {
+                                                "guild_id": guild_id,
+                                                "typing": true,
+                                                "threads": false,
+                                                "activities": true,
+                                                "members": [],
+                                                "channels": ch_ranges
+                                            }
+                                        });
+                                        let _ = tx
+                                            .send(WsMessage::Text(sub_msg.to_string().into()))
+                                            .await;
+                                    }
                                 }
                             }
 
@@ -668,7 +986,6 @@ impl GatewayManager {
                                 guilds: guilds_list,
                             };
 
-                            // Guardar en el snapshot compartido ANTES de emitir el evento
                             if let Ok(mut snap) = snapshot_lock().lock() {
                                 snap.status = "ready".to_string();
                                 snap.ready_payload = Some(ready_payload.clone());
@@ -676,12 +993,184 @@ impl GatewayManager {
                             }
 
                             emit_ipc_event(&app, "gateway-ready", &ready_payload);
+                        } else if event_type == "READY_SUPPLEMENTAL" {
+                            let d = &val["d"];
+                            // Procesar presencias y voice_states suplementarios que Discord envía justo después de READY
+                            if let Some(mpg) = d["merged_presences"]["guilds"].as_array() {
+                                for (g_idx, gp_val) in mpg.iter().enumerate() {
+                                    let guild_id = guild_ids_order.get(g_idx).cloned();
+                                    if let Some(gp_arr) = gp_val.as_array() {
+                                        for p in gp_arr {
+                                            if let Some(uid) = p["user_id"]
+                                                .as_str()
+                                                .or_else(|| p["user"]["id"].as_str())
+                                            {
+                                                let st = p["status"]
+                                                    .as_str()
+                                                    .unwrap_or("offline")
+                                                    .to_string();
+                                                let cs = extract_custom_status(
+                                                    p["activities"].as_array(),
+                                                );
+                                                let u_info = known_users.get(uid);
+                                                let pres_update = PresenceUpdatePayload {
+                                                    user_id: uid.to_string(),
+                                                    guild_id: guild_id.clone(),
+                                                    status: st,
+                                                    custom_status: cs,
+                                                    username: u_info.map(|u| u.username.clone()),
+                                                    global_name: u_info
+                                                        .and_then(|u| u.global_name.clone()),
+                                                    avatar: u_info.and_then(|u| u.avatar.clone()),
+                                                };
+                                                if let Ok(mut snap) = snapshot_lock().lock() {
+                                                    snap.recent_presences.push(pres_update.clone());
+                                                }
+                                                emit_ipc_event(
+                                                    &app,
+                                                    "gateway-presence-update",
+                                                    &pres_update,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some(guilds_supp) = d["guilds"].as_array() {
+                                for g in guilds_supp {
+                                    let gid = g["id"].as_str().map(|s| s.to_string());
+                                    if let Some(vs_arr) = g["voice_states"].as_array() {
+                                        for vs in vs_arr {
+                                            if let Some(uid) = vs["user_id"].as_str() {
+                                                let ch_id = vs["channel_id"]
+                                                    .as_str()
+                                                    .map(|s| s.to_string());
+                                                let u_info = known_users.get(uid);
+                                                let uname = u_info
+                                                    .and_then(|u| {
+                                                        u.global_name
+                                                            .clone()
+                                                            .or_else(|| Some(u.username.clone()))
+                                                    })
+                                                    .unwrap_or_else(|| "Usuario".to_string());
+                                                let uavatar = u_info.and_then(|u| u.avatar.clone());
+
+                                                let vs_payload = VoiceStatePayload {
+                                                    user_id: uid.to_string(),
+                                                    channel_id: ch_id,
+                                                    guild_id: gid.clone(),
+                                                    username: uname,
+                                                    avatar: uavatar,
+                                                    self_mute: vs["self_mute"]
+                                                        .as_bool()
+                                                        .unwrap_or(false),
+                                                    self_deaf: vs["self_deaf"]
+                                                        .as_bool()
+                                                        .unwrap_or(false),
+                                                };
+                                                if let Ok(mut snap) = snapshot_lock().lock() {
+                                                    snap.recent_voice_states
+                                                        .push(vs_payload.clone());
+                                                }
+                                                emit_ipc_event(
+                                                    &app,
+                                                    "gateway-voice-state-update",
+                                                    &vs_payload,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         } else if event_type == "MESSAGE_CREATE" {
                             let d = val["d"].clone();
                             if let Ok(mut snap) = snapshot_lock().lock() {
                                 snap.recent_messages.push(d.clone());
                             }
                             emit_ipc_event(&app, "gateway-message-create", &d);
+                        } else if event_type == "PRESENCE_UPDATE" {
+                            let d = &val["d"];
+                            if let Some(uid) =
+                                d["user"]["id"].as_str().or_else(|| d["user_id"].as_str())
+                            {
+                                let status = d["status"].as_str().unwrap_or("offline").to_string();
+                                let custom_status =
+                                    extract_custom_status(d["activities"].as_array());
+                                let guild_id = d["guild_id"].as_str().map(|s| s.to_string());
+
+                                let username = d["user"]["username"]
+                                    .as_str()
+                                    .map(|s| s.to_string())
+                                    .or_else(|| known_users.get(uid).map(|u| u.username.clone()));
+                                let global_name = d["user"]["global_name"]
+                                    .as_str()
+                                    .map(|s| s.to_string())
+                                    .or_else(|| {
+                                        known_users.get(uid).and_then(|u| u.global_name.clone())
+                                    });
+                                let avatar =
+                                    d["user"]["avatar"].as_str().map(|s| s.to_string()).or_else(
+                                        || known_users.get(uid).and_then(|u| u.avatar.clone()),
+                                    );
+
+                                let pres_payload = PresenceUpdatePayload {
+                                    user_id: uid.to_string(),
+                                    guild_id,
+                                    status,
+                                    custom_status,
+                                    username,
+                                    global_name,
+                                    avatar,
+                                };
+
+                                if let Ok(mut snap) = snapshot_lock().lock() {
+                                    snap.recent_presences.push(pres_payload.clone());
+                                }
+                                emit_ipc_event(&app, "gateway-presence-update", &pres_payload);
+                            }
+                        } else if event_type == "VOICE_STATE_UPDATE" {
+                            let d = &val["d"];
+                            if let Some(uid) = d["user_id"].as_str() {
+                                let channel_id = d["channel_id"].as_str().map(|s| s.to_string());
+                                let guild_id = d["guild_id"].as_str().map(|s| s.to_string());
+
+                                let member_user = &d["member"]["user"];
+                                let username = member_user["global_name"]
+                                    .as_str()
+                                    .or_else(|| member_user["username"].as_str())
+                                    .map(|s| s.to_string())
+                                    .or_else(|| {
+                                        known_users.get(uid).map(|u| {
+                                            u.global_name
+                                                .clone()
+                                                .unwrap_or_else(|| u.username.clone())
+                                        })
+                                    })
+                                    .unwrap_or_else(|| "Usuario".to_string());
+
+                                let avatar = member_user["avatar"]
+                                    .as_str()
+                                    .map(|s| s.to_string())
+                                    .or_else(|| {
+                                        known_users.get(uid).and_then(|u| u.avatar.clone())
+                                    });
+
+                                let vs_payload = VoiceStatePayload {
+                                    user_id: uid.to_string(),
+                                    channel_id,
+                                    guild_id,
+                                    username,
+                                    avatar,
+                                    self_mute: d["self_mute"].as_bool().unwrap_or(false),
+                                    self_deaf: d["self_deaf"].as_bool().unwrap_or(false),
+                                };
+
+                                if let Ok(mut snap) = snapshot_lock().lock() {
+                                    snap.recent_voice_states.push(vs_payload.clone());
+                                }
+                                emit_ipc_event(&app, "gateway-voice-state-update", &vs_payload);
+                            }
                         }
                     }
 

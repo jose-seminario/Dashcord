@@ -4,9 +4,29 @@ export interface User {
   discriminator: string;
   global_name?: string | null;
   avatar?: string | null;
-  status: 'online' | 'idle' | 'dnd' | 'offline';
-  custom_status?: string;
+  status: 'online' | 'idle' | 'dnd' | 'offline' | string;
+  custom_status?: string | null;
   is_bot?: boolean;
+}
+
+export interface VoiceStateUser {
+  user_id: string;
+  channel_id?: string | null;
+  guild_id?: string | null;
+  username: string;
+  avatar?: string | null;
+  self_mute?: boolean;
+  self_deaf?: boolean;
+}
+
+export interface PresenceUpdate {
+  user_id: string;
+  guild_id?: string | null;
+  status: 'online' | 'idle' | 'dnd' | 'offline' | string;
+  custom_status?: string | null;
+  username?: string | null;
+  global_name?: string | null;
+  avatar?: string | null;
 }
 
 export interface Guild {
@@ -15,14 +35,16 @@ export interface Guild {
   icon?: string | null;
   unread_count?: number;
   channels: Channel[];
+  members?: User[];
+  voice_states?: VoiceStateUser[];
 }
 
 export interface Channel {
   id: string;
   guild_id?: string;
   name: string;
-  type: 'text' | 'voice' | 'announcement';
-  topic?: string;
+  type: 'text' | 'voice' | 'announcement' | string;
+  topic?: string | null;
   unread?: boolean;
 }
 
@@ -35,6 +57,8 @@ export interface Message {
   edited_timestamp?: string | null;
   attachments?: Attachment[];
   reactions?: Reaction[];
+  pending?: boolean;
+  failed?: boolean;
   reply_to?: {
     id: string;
     author: string;
