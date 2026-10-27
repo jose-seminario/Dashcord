@@ -8,6 +8,7 @@ edition = "2021"
 [lib]
 name = "dashcord_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false
 
 [features]
 default = []

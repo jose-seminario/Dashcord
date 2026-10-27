@@ -888,3 +888,73 @@ impl VoiceAudioEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opus_encoder_decoder_roundtrip() {
+        let mut encoder = OpusEncoder::new(
+            OpusSampleRate::Hz48000,
+            OpusChannels::Stereo,
+            OpusApp::Voip,
+        )
+        .expect("Fallo al inicializar codificador Opus");
+
+        let mut decoder = OpusDecoder::new(
+            OpusSampleRate::Hz48000,
+            OpusChannels::Stereo,
+        )
+        .expect("Fallo al inicializar decodificador Opus");
+
+        // Frame de 20ms a 48000Hz (960 muestras por canal * 2 canales = 1920 f32)
+        let pcm_in = vec![0.0f32; 1920];
+        let mut opus_out = vec![0u8; 1275];
+        let encoded_len = encoder
+            .encode_float(&pcm_in, &mut opus_out)
+            .expect("Fallo al codificar audio Opus");
+        assert!(encoded_len > 0);
+
+        let mut pcm_out = vec![0.0f32; 1920];
+        let packet = OpusPacket::try_from(&opus_out[..encoded_len])
+            .expect("Packet Opus inválido");
+        let decoded_samples = decoder
+            .decode_float(Some(packet), MutSignals::from(&mut pcm_out[..]), false)
+            .expect("Fallo al decodificar audio Opus");
+        assert_eq!(decoded_samples, 960);
+    }
+
+    #[test]
+    fn test_audio_xsalsa20_crypto_roundtrip() {
+        let key = [0x5au8; 32];
+        let nonce = [0x33u8; 24];
+        let plaintext = b"DashCord Encrypted Voice RTP Packet Data";
+        let mut buffer = plaintext.to_vec();
+
+        let cipher = XSalsa20Poly1305::new(SalsaKey::from_slice(&key));
+        cipher
+            .encrypt_in_place(SalsaNonce::from_slice(&nonce), b"", &mut buffer)
+            .expect("Fallo al cifrar paquete con xsalsa20poly1305");
+
+        assert_ne!(&buffer[..], plaintext);
+
+        cipher
+            .decrypt_in_place(SalsaNonce::from_slice(&nonce), b"", &mut buffer)
+            .expect("Fallo al descifrar paquete con xsalsa20poly1305");
+
+        assert_eq!(&buffer[..], plaintext);
+    }
+
+    #[test]
+    fn test_audio_hardware_detection_ci_safe() {
+        if std::env::var("CI").is_ok() {
+            println!("[AUDIO TEST] Entorno CI detectado (sin dispositivo de audio). Omitiendo consulta cpal.");
+            return;
+        }
+
+        let host = cpal::default_host();
+        let _ = host.default_output_device();
+        let _ = host.default_input_device();
+    }
+}

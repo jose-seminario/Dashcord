@@ -26,7 +26,7 @@ impl KeychainManager {
 
         #[cfg(any(test, feature = "test-mock"))]
         {
-            let mut guard = MOCK_KEYRING.lock().map_err(|e| e.to_string())?;
+            let mut guard = MOCK_KEYRING.lock().unwrap_or_else(|e| e.into_inner());
             let map = guard.get_or_insert_with(HashMap::new);
             map.insert(format!("{}:{}", SERVICE_NAME, TOKEN_USER), token.to_string());
             Ok(())
@@ -43,7 +43,7 @@ impl KeychainManager {
     pub fn get_token() -> Result<String, String> {
         #[cfg(any(test, feature = "test-mock"))]
         {
-            let guard = MOCK_KEYRING.lock().map_err(|e| e.to_string())?;
+            let guard = MOCK_KEYRING.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map) = guard.as_ref() {
                 if let Some(tok) = map.get(&format!("{}:{}", SERVICE_NAME, TOKEN_USER)) {
                     return Ok(tok.clone());
@@ -68,7 +68,7 @@ impl KeychainManager {
 
         #[cfg(any(test, feature = "test-mock"))]
         {
-            let mut guard = MOCK_KEYRING.lock().map_err(|e| e.to_string())?;
+            let mut guard = MOCK_KEYRING.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(map) = guard.as_mut() {
                 map.remove(&format!("{}:{}", SERVICE_NAME, TOKEN_USER));
             }
