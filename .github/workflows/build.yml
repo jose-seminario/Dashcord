@@ -12,6 +12,10 @@ jobs:
     env:
       CMAKE_GENERATOR: Ninja
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      CMAKE_POLICY_DEFAULT_CMP0091: "NEW"
+      CMAKE_MSVC_RUNTIME_LIBRARY: "MultiThreadedDLL"
+      LIBOPUS_STATIC: "1"
+      OPUS_STATIC: "1"
 
     steps:
       - name: Checkout repository
@@ -76,6 +80,11 @@ jobs:
         shell: pwsh
         env:
           CMAKE_GENERATOR: Ninja
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          CMAKE_POLICY_DEFAULT_CMP0091: "NEW"
+          CMAKE_MSVC_RUNTIME_LIBRARY: "MultiThreadedDLL"
+          LIBOPUS_STATIC: "1"
+          OPUS_STATIC: "1"
         run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
 
       - name: Build Tauri Application
@@ -83,6 +92,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CMAKE_GENERATOR: Ninja
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          CMAKE_POLICY_DEFAULT_CMP0091: "NEW"
+          CMAKE_MSVC_RUNTIME_LIBRARY: "MultiThreadedDLL"
+          LIBOPUS_STATIC: "1"
+          OPUS_STATIC: "1"
         with:
           args: --target x86_64-pc-windows-msvc
 
