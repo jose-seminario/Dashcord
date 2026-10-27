@@ -426,8 +426,8 @@ impl VoiceGatewayManager {
                 break;
             }
 
-            if let WsMessage::Text(raw_text) = msg {
-                let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_text) else {
+            if let WsMessage::Text(ref raw_text) = msg {
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(raw_text) else {
                     continue;
                 };
 
@@ -667,7 +667,7 @@ impl VoiceGatewayManager {
                 }
             }
 
-            if let WsMessage::Binary(bin_data) = msg {
+            if let WsMessage::Binary(ref bin_data) = msg {
                 let data: &[u8] = bin_data.as_ref();
                 if data.is_empty() {
                     continue;
