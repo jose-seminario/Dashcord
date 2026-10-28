@@ -625,7 +625,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const pendingIdx = currentList.findIndex(
         (m) =>
           m.pending &&
-          m.author.id === newMsg.author.id &&
+          (m.author.id === newMsg.author.id ||
+            m.author.id === state.currentUser.id ||
+            m.author.username === newMsg.author.username) &&
           m.content.trim() === newMsg.content.trim()
       );
 

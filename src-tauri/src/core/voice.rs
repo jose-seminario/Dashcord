@@ -342,7 +342,7 @@ impl VoiceGatewayManager {
 
         let connect_res = timeout(
             VOICE_HANDSHAKE_TIMEOUT,
-            connect_async_with_config(request, Some(ws_config), false),
+            connect_async_with_config(request, Some(ws_config), true),
         )
         .await;
 

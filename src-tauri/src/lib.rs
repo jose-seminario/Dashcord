@@ -6,6 +6,7 @@ use core::gateway::GatewaySnapshot;
 use core::{DiscordRestClient, GatewayManager};
 use evasion::{SuperProperties, VersionResolver};
 use std::io::Write;
+use std::sync::{Arc, OnceLock};
 use storage::KeychainManager;
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
@@ -37,14 +38,30 @@ fn get_gateway_snapshot() -> Result<GatewaySnapshot, String> {
     Ok(GatewayManager::get_snapshot())
 }
 
+static SHARED_REST_CLIENT: OnceLock<std::sync::Mutex<Option<(String, Arc<DiscordRestClient>)>>> =
+    OnceLock::new();
+
+fn get_shared_client(token: &str) -> Result<Arc<DiscordRestClient>, String> {
+    let mutex = SHARED_REST_CLIENT.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((ref cached_token, ref client)) = *guard {
+        if cached_token == token {
+            return Ok(client.clone());
+        }
+    }
+    let props = SuperProperties::default();
+    let new_client = Arc::new(DiscordRestClient::new(Some(token.to_string()), &props)?);
+    *guard = Some((token.to_string(), new_client.clone()));
+    Ok(new_client)
+}
+
 #[tauri::command]
 async fn fetch_channel_messages(
     channel_id: String,
     limit: Option<u32>,
 ) -> Result<serde_json::Value, String> {
     let token = resolve_active_token()?;
-    let props = SuperProperties::default();
-    let client = DiscordRestClient::new(Some(token), &props)?;
+    let client = get_shared_client(&token)?;
     client
         .get_channel_messages(&channel_id, limit.unwrap_or(50))
         .await
@@ -56,8 +73,7 @@ async fn send_discord_message(
     content: String,
 ) -> Result<serde_json::Value, String> {
     let token = resolve_active_token()?;
-    let props = SuperProperties::default();
-    let client = DiscordRestClient::new(Some(token), &props)?;
+    let client = get_shared_client(&token)?;
     client.send_message(&channel_id, &content).await
 }
 

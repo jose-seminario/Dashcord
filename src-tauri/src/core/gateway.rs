@@ -110,16 +110,7 @@ fn emit_ipc_event<S: Serialize + Clone>(app: &tauri::AppHandle, event_name: &str
 
     if let Some(main_win) = app.get_webview_window("main") {
         let _ = main_win.emit(event_name, payload.clone());
-
-        if let Ok(json_str) = serde_json::to_string(payload) {
-            let js_code = format!(
-                "window.dispatchEvent(new CustomEvent('dashcord:{}', {{ detail: {} }}));",
-                event_name, json_str
-            );
-            let _ = main_win.eval(&js_code);
-        }
     }
-    let _ = std::io::stdout().flush();
 }
 
 /// Generador de jitter pseudoaleatorio basado en nanosegundos y xorshift
@@ -494,10 +485,10 @@ impl GatewayManager {
         ws_config.max_message_size = None;
         ws_config.max_frame_size = None;
 
-        // 2. Establecer handshake WebSocket con timeout de 10s
+        // 2. Establecer handshake WebSocket con timeout de 10s y Nagle deshabilitado (TCP_NODELAY = true)
         let connect_res = timeout(
             HANDSHAKE_TIMEOUT,
-            connect_async_with_config(request, Some(ws_config), false),
+            connect_async_with_config(request, Some(ws_config), true),
         )
         .await;
 
@@ -1258,6 +1249,9 @@ impl GatewayManager {
                             let d = val["d"].clone();
                             if let Ok(mut snap) = snapshot_lock().lock() {
                                 snap.recent_messages.push(d.clone());
+                                if snap.recent_messages.len() > 20 {
+                                    snap.recent_messages.remove(0);
+                                }
                             }
                             emit_ipc_event(&app, "gateway-message-create", &d);
                         } else if event_type == "PRESENCE_UPDATE" {
